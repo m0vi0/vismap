@@ -2,9 +2,9 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import threading
 import time
-import webbrowser
 from collections import defaultdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -224,6 +224,17 @@ def parse_args():
     return parser.parse_args()
 
 
+def open_browser(url):
+    try:
+        if os.uname().sysname == "Darwin":
+            subprocess.Popen(["open", url])
+        else:
+            subprocess.Popen(["python3", "-m", "webbrowser", url])
+    except Exception as exc:
+        print(f"Could not open browser automatically: {exc}")
+        print(f"Open {url} manually.")
+
+
 if __name__ == "__main__":
     args = parse_args()
     iface = args.iface
@@ -235,6 +246,6 @@ if __name__ == "__main__":
     print("Packet capture may require launching this process with sudo/admin privileges.")
 
     if not args.no_open:
-        webbrowser.open(url)
+        open_browser(url)
 
     asyncio.run(main())
