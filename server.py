@@ -6,14 +6,9 @@ import threading
 import time
 import webbrowser
 from collections import defaultdict
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import websockets
 from scapy.all import DNS, IP, TCP, UDP, sniff
-
-ROOT = Path(__file__).resolve().parent
-DIST_DIR = ROOT / "client" / "dist"
 
 clients = set()
 node_data = defaultdict(lambda: {"bytes": 0, "packets": 0, "ip": ""})
@@ -182,37 +177,6 @@ async def handler(websocket):
         print(f"[-] Client disconnected. Total: {len(clients)}")
 
 
-class AppHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(DIST_DIR), **kwargs)
-
-    def end_headers(self):
-        self.send_header("Cache-Control", "no-store")
-        super().end_headers()
-
-    def do_GET(self):
-        if not DIST_DIR.exists():
-            self.send_response(503)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(
-                b"client/dist is missing. Run: cd client && npm install && npm run build\n"
-            )
-            return
-
-        requested = DIST_DIR / self.path.lstrip("/")
-        if self.path == "/" or not requested.exists():
-            self.path = "/index.html"
-        super().do_GET()
-
-
-def start_http_server(port):
-    server = ThreadingHTTPServer(("127.0.0.1", port), AppHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server
-
-
 async def main():
     global loop
     loop = asyncio.get_running_loop()
@@ -226,7 +190,7 @@ async def main():
 def parse_args():
     parser = argparse.ArgumentParser(description="pacmap local packet visualizer")
     parser.add_argument("--iface", default=iface, help="Network interface to capture")
-    parser.add_argument("--port", type=int, default=8080, help="Frontend HTTP port")
+    parser.add_argument("--app-url", default="http://127.0.0.1:5173", help="Frontend app URL")
     parser.add_argument("--open", action="store_true", help="Open the browser automatically")
     parser.add_argument("--no-open", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
@@ -244,13 +208,10 @@ if __name__ == "__main__":
     args = parse_args()
     iface = args.iface
 
-    start_http_server(args.port)
-    url = f"http://127.0.0.1:{args.port}"
-    print(f"Serving pacmap app on {url}")
-    print(f"Open {url}, then click Start host capture in the browser.")
+    print(f"Open {args.app_url}, then click Start host capture in the browser.")
     print("Packet capture may require launching this process with sudo/admin privileges.")
 
     if args.open and not args.no_open:
-        open_browser(url)
+        open_browser(args.app_url)
 
     asyncio.run(main())

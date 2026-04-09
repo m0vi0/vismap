@@ -15,11 +15,10 @@ npm start
 The launcher will:
 
 - install frontend dependencies if `client/node_modules` is missing
-- build the React app
-- start the local Python server
-- serve the UI at `http://127.0.0.1:8080`
+- start the local Python WebSocket capture server
+- start the Vite UI at `http://127.0.0.1:5173`
 
-Open `http://127.0.0.1:8080` in your browser, then click `Start host capture` to begin packet capture.
+Open `http://127.0.0.1:5173` in your browser, then click `Start host capture` to begin packet capture.
 
 On macOS/Linux you can also run:
 
@@ -61,7 +60,7 @@ npm start -- --open
 If macOS cannot open the browser automatically, open this URL manually:
 
 ```text
-http://127.0.0.1:8080
+http://127.0.0.1:5173
 ```
 
 ## Development
@@ -81,7 +80,7 @@ cd client
 npm run build
 ```
 
-Server only, after building the client:
+Capture server only:
 
 ```bash
 python3 server.py
