@@ -1,4 +1,7 @@
 export default function HeroAsciiOne({ children }) {
+  const host = window.location.hostname || 'localhost'
+  const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80')
+
   return (
     <main className="asciiHero">
       <div className="asciiStars" aria-hidden="true" />
@@ -12,9 +15,9 @@ export default function HeroAsciiOne({ children }) {
         </div>
 
         <div className="asciiCoords">
-          <span>LAT: LOCALHOST</span>
+          <span>HOST: {host.toUpperCase()}</span>
           <i />
-          <span>PORT: 8080</span>
+          <span>PORT: {port}</span>
         </div>
       </div>
 
