@@ -1,8 +1,8 @@
 # pacmap
 
-pacmap is a local 3D packet tracer for host network traffic.
+pacmap is a local packet map for host network traffic.
 
-It renders devices as 3D nodes, links communicating devices with edges, and moves packet particles directly along those edges. Nodes grow as they send or receive more data.
+It visualizes devices as nodes, links communicating devices with edges, and shows packet activity moving along those connections. Nodes grow as they send or receive more data.
 
 ## Run
 
