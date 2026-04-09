@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import AetherFlowHero from './components/ui/aether-flow-hero.jsx'
+import HeroAsciiOne from './components/ui/hero-ascii-one.jsx'
 import './App.css'
 
 const WS_URL = 'ws://127.0.0.1:8765'
@@ -9,10 +9,10 @@ const MAX_PACKET_PARTICLES = 420
 const NODE_LIMIT = 18
 
 const PROTOCOLS = {
-  TCP: { color: 0x36e4ff, label: 'TCP' },
-  UDP: { color: 0xff5ab8, label: 'UDP' },
-  DNS: { color: 0x50f2a4, label: 'DNS' },
-  OTHER: { color: 0xffc857, label: 'Other' },
+  TCP: { color: 0xf4f4f5, label: 'TCP' },
+  UDP: { color: 0xb7b7bd, label: 'UDP' },
+  DNS: { color: 0xd8d8dc, label: 'DNS' },
+  OTHER: { color: 0x8b8b93, label: 'Other' },
 }
 
 function byteLabel(bytes) {
@@ -26,7 +26,7 @@ function edgeKey(src, dst) {
   return [src, dst].sort().join('<>')
 }
 
-function makeTextSprite(text, accent = '#36e4ff') {
+function makeTextSprite(text, accent = '#d8d8dc') {
   const canvas = document.createElement('canvas')
   canvas.width = 512
   canvas.height = 128
@@ -36,7 +36,7 @@ function makeTextSprite(text, accent = '#36e4ff') {
   ctx.font = '600 34px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.fillStyle = 'rgba(3, 8, 10, 0.78)'
+  ctx.fillStyle = 'rgba(6, 6, 7, 0.82)'
   ctx.fillRect(16, 30, 480, 68)
   ctx.strokeStyle = accent
   ctx.lineWidth = 3
@@ -72,35 +72,6 @@ function randomPosition(index) {
   }
 }
 
-function createGridTexture() {
-  const canvas = document.createElement('canvas')
-  canvas.width = 512
-  canvas.height = 512
-  const ctx = canvas.getContext('2d')
-
-  ctx.fillStyle = '#030506'
-  ctx.fillRect(0, 0, canvas.width, canvas.height)
-  ctx.strokeStyle = 'rgba(54, 228, 255, 0.12)'
-  ctx.lineWidth = 1
-
-  for (let i = 0; i <= 512; i += 32) {
-    ctx.beginPath()
-    ctx.moveTo(i, 0)
-    ctx.lineTo(i, 512)
-    ctx.stroke()
-    ctx.beginPath()
-    ctx.moveTo(0, i)
-    ctx.lineTo(512, i)
-    ctx.stroke()
-  }
-
-  const texture = new THREE.CanvasTexture(canvas)
-  texture.wrapS = THREE.RepeatWrapping
-  texture.wrapT = THREE.RepeatWrapping
-  texture.repeat.set(6, 6)
-  return texture
-}
-
 export default function App() {
   const mountRef = useRef(null)
   const nodesRef = useRef(new Map())
@@ -128,7 +99,7 @@ export default function App() {
     const edgeStore = edgesRef.current
     const packetStore = packetsRef.current
     const scene = new THREE.Scene()
-    scene.background = null
+    scene.background = new THREE.Color(0x050505)
 
     const camera = new THREE.PerspectiveCamera(54, mount.clientWidth / mount.clientHeight, 0.1, 2200)
     camera.position.set(150, 130, 285)
@@ -146,30 +117,14 @@ export default function App() {
     controls.maxDistance = 760
     controls.screenSpacePanning = true
 
-    scene.add(new THREE.HemisphereLight(0xe9fff9, 0x11221f, 2.6))
-    scene.add(new THREE.AmbientLight(0xffffff, 1.35))
-    const keyLight = new THREE.DirectionalLight(0xffffff, 1.8)
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x161616, 2.9))
+    scene.add(new THREE.AmbientLight(0xffffff, 1.55))
+    const keyLight = new THREE.DirectionalLight(0xffffff, 2.1)
     keyLight.position.set(220, 260, 160)
     scene.add(keyLight)
-    const rimLight = new THREE.PointLight(0xffc857, 2.2, 600)
+    const rimLight = new THREE.PointLight(0xd8d8dc, 1.8, 600)
     rimLight.position.set(-180, -80, -120)
     scene.add(rimLight)
-
-    const gridTexture = createGridTexture()
-    const grid = new THREE.Mesh(
-      new THREE.PlaneGeometry(900, 900),
-      new THREE.MeshStandardMaterial({
-        map: gridTexture,
-        color: 0x283332,
-        roughness: 0.82,
-        metalness: 0.08,
-        transparent: true,
-        opacity: 0.55,
-      }),
-    )
-    grid.rotation.x = -Math.PI / 2
-    grid.position.y = -105
-    scene.add(grid)
 
     const nodeGeometry = new THREE.SphereGeometry(8, 32, 24)
     const edgeGeometry = new THREE.CylinderGeometry(1, 1, 1, 10)
@@ -210,11 +165,11 @@ export default function App() {
       group.position.set(position.x, position.y, position.z)
 
       const material = new THREE.MeshStandardMaterial({
-        color: 0x7df7ff,
-        emissive: 0x1eb8c7,
-        emissiveIntensity: 0.38,
-        roughness: 0.48,
-        metalness: 0.18,
+        color: 0xe7e7ea,
+        emissive: 0x9b9ba3,
+        emissiveIntensity: 0.28,
+        roughness: 0.42,
+        metalness: 0.22,
       })
       const mesh = new THREE.Mesh(nodeGeometry, material)
       mesh.userData.ip = ip
@@ -252,9 +207,9 @@ export default function App() {
       if (edgeStore.has(key)) return edgeStore.get(key)
 
       const material = new THREE.MeshBasicMaterial({
-        color: 0x36e4ff,
+        color: 0xb7b7bd,
         transparent: true,
-        opacity: 0.34,
+        opacity: 0.46,
       })
       const mesh = new THREE.Mesh(edgeGeometry, material)
       scene.add(mesh)
@@ -322,65 +277,11 @@ export default function App() {
       snapshotState()
     }
 
-    function simulateForces() {
+    function updateGraphVisuals() {
       const nodeList = [...nodeStore.values()]
       const edgeList = [...edgeStore.values()]
-      if (nodeList.length < 2) return
-
-      for (let i = 0; i < nodeList.length; i += 1) {
-        for (let j = i + 1; j < nodeList.length; j += 1) {
-          const a = nodeList[i]
-          const b = nodeList[j]
-          const dx = b.x - a.x
-          const dy = b.y - a.y
-          const dz = b.z - a.z
-          const distSq = Math.max(dx * dx + dy * dy + dz * dz, 80)
-          const dist = Math.sqrt(distSq)
-          const force = 1850 / distSq
-          const fx = (dx / dist) * force
-          const fy = (dy / dist) * force
-          const fz = (dz / dist) * force
-
-          a.vx -= fx
-          a.vy -= fy
-          a.vz -= fz
-          b.vx += fx
-          b.vy += fy
-          b.vz += fz
-        }
-      }
-
-      edgeList.forEach((edge) => {
-        const a = nodeStore.get(edge.src)
-        const b = nodeStore.get(edge.dst)
-        if (!a || !b) return
-
-        const dx = b.x - a.x
-        const dy = b.y - a.y
-        const dz = b.z - a.z
-        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1
-        const preferred = 105 + Math.min(Math.log10(edge.bytes + 1) * 9, 55)
-        const force = 0.011 * (dist - preferred)
-        const fx = (dx / dist) * force
-        const fy = (dy / dist) * force
-        const fz = (dz / dist) * force
-
-        a.vx += fx
-        a.vy += fy
-        a.vz += fz
-        b.vx -= fx
-        b.vy -= fy
-        b.vz -= fz
-      })
 
       nodeList.forEach((node) => {
-        node.vx *= 0.86
-        node.vy *= 0.86
-        node.vz *= 0.86
-        node.x += node.vx
-        node.y += node.vy
-        node.z += node.vz
-
         const scale = THREE.MathUtils.clamp(1 + Math.log10(node.bytes + 1) * 0.18, 1, 3.8)
         const pulse = THREE.MathUtils.clamp(node.recentBytes / 4500, 0, 1.8)
         node.group.position.set(node.x, node.y, node.z)
@@ -397,7 +298,7 @@ export default function App() {
         const start = new THREE.Vector3(a.x, a.y, a.z)
         const end = new THREE.Vector3(b.x, b.y, b.z)
         const radius = THREE.MathUtils.clamp(0.36 + Math.log10(edge.bytes + 1) * 0.13, 0.36, 2.35)
-        edge.mesh.material.opacity = THREE.MathUtils.clamp(0.23 + edge.recentBytes / 5500, 0.23, 0.86)
+        edge.mesh.material.opacity = THREE.MathUtils.clamp(0.28 + edge.recentBytes / 5500, 0.28, 0.78)
         setCylinderBetween(edge.mesh, start, end, radius)
         edge.recentBytes *= 0.88
       })
@@ -437,7 +338,7 @@ export default function App() {
     function animate() {
       frameRef.current = requestAnimationFrame(animate)
       controls.update()
-      simulateForces()
+      updateGraphVisuals()
       updatePackets()
 
       nodeStore.forEach((node) => {
@@ -523,7 +424,6 @@ export default function App() {
       nodeGeometry.dispose()
       edgeGeometry.dispose()
       packetGeometry.dispose()
-      gridTexture.dispose()
       renderer.dispose()
 
       if (mount.contains(renderer.domElement)) {
@@ -555,16 +455,15 @@ export default function App() {
 
   return (
     <main className="appShell">
-      <AetherFlowHero
-        title="VISMAP"
-        badge="Host Packet Flow"
-        actionLabel="Browser-gated capture"
-        description="A live packet tracer with clean 3D nodes, direct edge paths, and host network traffic after you approve capture locally."
-      >
-      <section className="viewport" aria-label="3D packet tracer">
+      <HeroAsciiOne>
+        <section className="viewport" aria-label="3D packet tracer">
         <div ref={mountRef} className="canvasMount" />
 
         <header className="topBar" aria-label="Capture status">
+          <div className="brandBlock">
+            <p>VISMAP</p>
+            <h1>Noir Packet Graph</h1>
+          </div>
           <div className={`statusPill status-${status}`}>
             <span />
             {statusText}
@@ -675,8 +574,8 @@ export default function App() {
           ))}
           <strong>Drag to orbit. Scroll to zoom. Click a node to inspect.</strong>
         </footer>
-      </section>
-      </AetherFlowHero>
+        </section>
+      </HeroAsciiOne>
     </main>
   )
 }

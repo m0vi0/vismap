@@ -1,6 +1,6 @@
 :root {
-  color: #f7fbfa;
-  background: #07110f;
+  color: #f4f4f5;
+  background: #050505;
   font-family:
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
@@ -31,107 +31,206 @@ button {
   width: 100vw;
   height: 100dvh;
   overflow: hidden;
-  background: #07110f;
+  background: #050505;
 }
 
-.aetherFlowHero {
+.asciiHero {
   position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
+  background:
+    radial-gradient(circle at 36% 42%, rgba(244, 244, 245, 0.08), transparent 25rem),
+    linear-gradient(135deg, #0d0d0e 0%, #050505 50%, #101012 100%);
 }
 
-.aetherCanvas,
-.aetherShade {
+.asciiStars,
+.asciiNoise {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
+  pointer-events: none;
 }
 
-.aetherCanvas {
+.asciiStars {
   z-index: 0;
+  opacity: 0.28;
+  background-image:
+    radial-gradient(1px 1px at 20% 30%, #f4f4f5, transparent),
+    radial-gradient(1px 1px at 60% 70%, #f4f4f5, transparent),
+    radial-gradient(1px 1px at 50% 50%, #f4f4f5, transparent),
+    radial-gradient(1px 1px at 80% 10%, #f4f4f5, transparent),
+    radial-gradient(1px 1px at 90% 60%, #f4f4f5, transparent),
+    radial-gradient(1px 1px at 33% 80%, #f4f4f5, transparent),
+    radial-gradient(1px 1px at 15% 60%, #f4f4f5, transparent),
+    radial-gradient(1px 1px at 70% 40%, #f4f4f5, transparent);
+  background-position:
+    0 0,
+    40% 40%,
+    60% 60%,
+    20% 20%,
+    80% 80%,
+    30% 30%,
+    70% 70%,
+    50% 50%;
+  background-size:
+    200% 200%,
+    180% 180%,
+    250% 250%,
+    220% 220%,
+    190% 190%,
+    240% 240%,
+    210% 210%,
+    230% 230%;
 }
 
-.aetherShade {
+.asciiNoise {
   z-index: 1;
-  background:
-    radial-gradient(circle at 20% 18%, rgba(92, 235, 255, 0.18), transparent 27rem),
-    radial-gradient(circle at 84% 76%, rgba(255, 200, 87, 0.16), transparent 30rem),
-    linear-gradient(180deg, rgba(7, 17, 15, 0.04), rgba(7, 17, 15, 0.56));
-  pointer-events: none;
+  opacity: 0.1;
+  background-image:
+    repeating-linear-gradient(0deg, transparent 0, transparent 2px, rgba(244, 244, 245, 0.2) 3px),
+    repeating-linear-gradient(90deg, transparent 0, transparent 22px, rgba(244, 244, 245, 0.08) 23px);
 }
 
-.aetherIntro {
+.asciiHeader,
+.asciiFooter {
   position: absolute;
-  top: 22px;
-  left: 22px;
+  left: 0;
+  right: 0;
   z-index: 5;
-  width: min(560px, calc(100vw - 44px));
+  border-color: rgba(244, 244, 245, 0.18);
+  background: rgba(5, 5, 5, 0.34);
+  color: rgba(244, 244, 245, 0.62);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  backdrop-filter: blur(10px);
+}
+
+.asciiHeader {
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid rgba(244, 244, 245, 0.18);
+  padding: 12px 22px;
+}
+
+.asciiBrand,
+.asciiCoords,
+.asciiFooter > div,
+.asciiBars,
+.asciiPulse {
+  display: flex;
+  align-items: center;
+}
+
+.asciiBrand {
+  gap: 14px;
+}
+
+.asciiLogo {
+  color: #f4f4f5;
+  font-size: 1.45rem;
+  font-weight: 900;
+  font-style: italic;
+  letter-spacing: 0.18em;
+  transform: skewX(-12deg);
+}
+
+.asciiDivider {
+  width: 1px;
+  height: 16px;
+  background: rgba(244, 244, 245, 0.34);
+}
+
+.asciiBrand span,
+.asciiCoords,
+.asciiFooter span {
+  font-size: 0.63rem;
+  letter-spacing: 0.08em;
+}
+
+.asciiCoords {
+  gap: 12px;
+}
+
+.asciiCoords i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: rgba(244, 244, 245, 0.4);
+}
+
+.corner {
+  position: absolute;
+  z-index: 5;
+  width: 46px;
+  height: 46px;
+  border-color: rgba(244, 244, 245, 0.3);
   pointer-events: none;
 }
 
-.aetherBadge {
-  display: inline-flex;
-  min-height: 38px;
+.cornerTopLeft {
+  top: 0;
+  left: 0;
+  border-top: 2px solid;
+  border-left: 2px solid;
+}
+
+.cornerTopRight {
+  top: 0;
+  right: 0;
+  border-top: 2px solid;
+  border-right: 2px solid;
+}
+
+.cornerBottomLeft {
+  bottom: 5vh;
+  left: 0;
+  border-bottom: 2px solid;
+  border-left: 2px solid;
+}
+
+.cornerBottomRight {
+  right: 0;
+  bottom: 5vh;
+  border-right: 2px solid;
+  border-bottom: 2px solid;
+}
+
+.asciiFooter {
+  bottom: 5vh;
+  display: flex;
   align-items: center;
-  gap: 8px;
-  border: 1px solid rgba(92, 235, 255, 0.34);
-  border-radius: 8px;
-  background: rgba(92, 235, 255, 0.09);
-  color: #f7fbfa;
-  font-size: 0.88rem;
-  font-weight: 760;
-  padding: 0 12px;
-  backdrop-filter: blur(12px);
+  justify-content: space-between;
+  border-top: 1px solid rgba(244, 244, 245, 0.18);
+  padding: 10px 22px;
 }
 
-.aetherBadge svg {
-  width: 17px;
-  height: 17px;
-  color: #ffc857;
+.asciiFooter > div {
+  gap: 18px;
 }
 
-.aetherIntro h1 {
-  margin: 12px 0 10px;
-  max-width: 100%;
-  color: #f7fbfa;
-  font-size: clamp(2.8rem, 7vw, 6.4rem);
-  line-height: 0.88;
-  letter-spacing: 0;
-  text-shadow: 0 0 36px rgba(92, 235, 255, 0.28);
+.asciiBars {
+  gap: 4px;
 }
 
-.aetherIntro p {
-  max-width: 48rem;
-  margin: 0 0 18px;
-  color: rgba(247, 251, 250, 0.74);
-  font-size: 1rem;
-  line-height: 1.55;
+.asciiBars i {
+  width: 4px;
+  background: rgba(244, 244, 245, 0.28);
 }
 
-.aetherAction {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  gap: 8px;
-  border-radius: 8px;
-  background: #f7fbfa;
-  color: #07110f;
-  font-size: 0.95rem;
-  font-weight: 820;
-  padding: 0 15px;
-  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.24);
+.asciiPulse {
+  gap: 5px;
 }
 
-.aetherAction svg {
-  width: 18px;
-  height: 18px;
+.asciiPulse i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(244, 244, 245, 0.4);
 }
 
 .viewport {
-  position: absolute;
-  inset: 0;
+  position: relative;
   z-index: 2;
   width: 100%;
   height: 100%;
@@ -141,7 +240,7 @@ button {
 .canvasMount {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: 1;
 }
 
 .canvasMount canvas {
@@ -158,23 +257,23 @@ button {
 
 .topBar {
   position: absolute;
-  top: 20px;
+  top: 72px;
   left: 22px;
   right: 22px;
-  z-index: 6;
+  z-index: 4;
   display: flex;
   align-items: flex-start;
-  justify-content: flex-end;
+  justify-content: space-between;
   gap: 18px;
   pointer-events: none;
 }
 
-.eyebrow {
-  margin: 0 0 4px;
-  color: #50f2a4;
+.brandBlock p {
+  margin: 0 0 6px;
+  color: rgba(244, 244, 245, 0.58);
   font-size: 0.78rem;
   font-weight: 800;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.2em;
 }
 
 h1,
@@ -183,13 +282,14 @@ p {
   overflow-wrap: anywhere;
 }
 
-h1 {
+.brandBlock h1 {
   margin: 0;
-  max-width: min(560px, 68vw);
-  color: #f7fbfa;
-  font-size: clamp(2rem, 4.5vw, 4.75rem);
+  max-width: min(560px, 62vw);
+  color: #f4f4f5;
+  font-size: clamp(2rem, 4.8vw, 4.9rem);
   line-height: 0.96;
   letter-spacing: 0;
+  text-shadow: 0 22px 80px rgba(0, 0, 0, 0.85);
 }
 
 .statusPill {
@@ -198,52 +298,53 @@ h1 {
   align-items: center;
   gap: 10px;
   padding: 0 14px;
-  border: 1px solid rgba(247, 251, 250, 0.2);
+  border: 1px solid rgba(244, 244, 245, 0.18);
   border-radius: 8px;
-  background: rgba(8, 17, 15, 0.7);
-  color: #f7fbfa;
+  background: rgba(8, 8, 9, 0.76);
+  color: #f4f4f5;
   font-size: 0.9rem;
   font-weight: 750;
   white-space: nowrap;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.36);
+  backdrop-filter: blur(14px);
 }
 
 .statusPill span {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: #ffc857;
+  background: #d8d8dc;
 }
 
 .status-live span {
-  background: #50f2a4;
-  box-shadow: 0 0 0 6px rgba(80, 242, 164, 0.16);
+  background: #f4f4f5;
+  box-shadow: 0 0 0 6px rgba(244, 244, 245, 0.12);
 }
 
 .status-capture_error span,
 .status-offline span {
-  background: #ff5a5f;
+  background: #8b8b93;
 }
 
 .permissionPanel {
   position: absolute;
   top: 50%;
   left: 50%;
-  z-index: 7;
+  z-index: 5;
   width: min(430px, calc(100vw - 32px));
   transform: translate(-50%, -50%);
-  border: 1px solid rgba(92, 235, 255, 0.34);
+  border: 1px solid rgba(244, 244, 245, 0.22);
   border-radius: 8px;
-  background: rgba(8, 17, 15, 0.82);
-  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.44);
-  color: #f7fbfa;
+  background: rgba(8, 8, 9, 0.88);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58);
+  color: #f4f4f5;
   padding: 22px;
   backdrop-filter: blur(16px);
 }
 
 .permissionKicker {
   margin: 0 0 8px;
-  color: #50f2a4;
+  color: rgba(244, 244, 245, 0.58);
   font-size: 0.75rem;
   font-weight: 800;
   letter-spacing: 0.08em;
@@ -258,15 +359,15 @@ h1 {
 
 .permissionPanel p {
   margin: 0 0 14px;
-  color: rgba(247, 251, 250, 0.74);
+  color: rgba(244, 244, 245, 0.72);
   font-size: 0.96rem;
   line-height: 1.55;
 }
 
 .permissionPanel .permissionError {
-  border-left: 3px solid #ff5a5f;
-  background: rgba(255, 90, 95, 0.12);
-  color: #ffd3d4;
+  border-left: 3px solid #8b8b93;
+  background: rgba(244, 244, 245, 0.08);
+  color: #f4f4f5;
   padding: 10px 12px;
 }
 
@@ -275,18 +376,18 @@ h1 {
   width: 100%;
   border: 0;
   border-radius: 8px;
-  background: #f7fbfa;
-  color: #07110f;
+  background: #f4f4f5;
+  color: #050505;
   cursor: pointer;
   font-weight: 820;
 }
 
 .hud {
   position: absolute;
-  top: 118px;
+  top: 178px;
   right: 22px;
   bottom: 76px;
-  z-index: 6;
+  z-index: 4;
   display: flex;
   width: min(390px, calc(100vw - 44px));
   min-width: 0;
@@ -305,10 +406,10 @@ h1 {
 
 .statGrid div,
 .panel {
-  border: 1px solid rgba(247, 251, 250, 0.16);
+  border: 1px solid rgba(244, 244, 245, 0.16);
   border-radius: 8px;
-  background: rgba(8, 17, 15, 0.7);
-  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.28);
+  background: rgba(8, 8, 9, 0.76);
+  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.36);
   backdrop-filter: blur(14px);
 }
 
@@ -321,7 +422,7 @@ h1 {
 .panelTitle span,
 dt {
   display: block;
-  color: rgba(247, 251, 250, 0.62);
+  color: rgba(244, 244, 245, 0.56);
   font-size: 0.74rem;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -331,7 +432,7 @@ dt {
 .statGrid strong {
   display: block;
   margin-top: 6px;
-  color: #f7fbfa;
+  color: #f4f4f5;
   font-size: 1.44rem;
   line-height: 1;
   overflow-wrap: anywhere;
@@ -351,7 +452,7 @@ dt {
 
 .panelTitle h2 {
   margin: 0;
-  color: #f7fbfa;
+  color: #f4f4f5;
   font-size: 1rem;
   line-height: 1.2;
   letter-spacing: 0;
@@ -370,10 +471,10 @@ dt {
   align-items: center;
   gap: 10px;
   width: 100%;
-  border: 1px solid rgba(247, 251, 250, 0.1);
+  border: 1px solid rgba(244, 244, 245, 0.1);
   border-radius: 8px;
-  background: rgba(247, 251, 250, 0.06);
-  color: #f7fbfa;
+  background: rgba(244, 244, 245, 0.06);
+  color: #f4f4f5;
   cursor: pointer;
   padding: 9px 10px;
   text-align: left;
@@ -382,7 +483,7 @@ dt {
 .nodeRow:hover,
 .nodeRow:focus-visible,
 .nodeRow.selected {
-  border-color: rgba(54, 228, 255, 0.78);
+  border-color: rgba(244, 244, 245, 0.64);
   outline: none;
 }
 
@@ -390,7 +491,7 @@ dt {
 .linkRow span {
   min-width: 0;
   overflow: hidden;
-  color: rgba(247, 251, 250, 0.88);
+  color: rgba(244, 244, 245, 0.86);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.8rem;
   text-overflow: ellipsis;
@@ -400,7 +501,7 @@ dt {
 .nodeRow strong,
 .linkRow strong,
 dd {
-  color: #ffc857;
+  color: #d8d8dc;
   font-size: 0.84rem;
   font-weight: 800;
   white-space: nowrap;
@@ -411,15 +512,15 @@ dd {
   min-height: 48px;
   grid-template-columns: minmax(0, 1fr);
   gap: 3px;
-  border-left: 3px solid #50f2a4;
+  border-left: 3px solid #b7b7bd;
   border-radius: 0 8px 8px 0;
-  background: rgba(247, 251, 250, 0.05);
+  background: rgba(244, 244, 245, 0.05);
   padding: 8px 10px;
 }
 
 .emptyText {
   margin: 0;
-  color: rgba(247, 251, 250, 0.64);
+  color: rgba(244, 244, 245, 0.62);
   font-size: 0.92rem;
   line-height: 1.5;
 }
@@ -442,18 +543,18 @@ dd {
 .legend {
   position: absolute;
   right: 22px;
-  bottom: 20px;
+  bottom: calc(5vh + 62px);
   left: 22px;
-  z-index: 6;
+  z-index: 4;
   display: flex;
   min-height: 44px;
   align-items: center;
   gap: 10px 18px;
   overflow-x: auto;
-  border: 1px solid rgba(247, 251, 250, 0.14);
+  border: 1px solid rgba(244, 244, 245, 0.14);
   border-radius: 8px;
-  background: rgba(8, 17, 15, 0.7);
-  color: rgba(247, 251, 250, 0.78);
+  background: rgba(8, 8, 9, 0.76);
+  color: rgba(244, 244, 245, 0.72);
   font-size: 0.88rem;
   padding: 10px 14px;
   white-space: nowrap;
@@ -474,7 +575,7 @@ dd {
 
 .legend strong {
   margin-left: auto;
-  color: #f7fbfa;
+  color: #f4f4f5;
   font-size: 0.86rem;
 }
 
@@ -485,7 +586,7 @@ dd {
     right: 14px;
   }
 
-  h1 {
+  .brandBlock h1 {
     max-width: 58vw;
     font-size: 2rem;
   }
