@@ -12,7 +12,7 @@ def draw_frame(stdscr, t):
     x = int((math.sin(t) + 1) * (WIDTH // 2))
     y = HEIGHT // 2
 
-    stdscr.addstr(0, 0, "VISMAP (terminal mode)")
+    stdscr.addstr(0, 0, "pacmap (terminal mode)")
     stdscr.addstr(y, x, "●")
 
     stdscr.refresh()

@@ -1,5 +1,5 @@
 {
-  "name": "vismap",
+  "name": "pacmap",
   "private": true,
   "version": "0.1.0",
   "scripts": {
@@ -7,6 +7,7 @@
     "build": "npm --prefix client run build",
     "lint": "npm --prefix client run lint",
     "preview": "npm --prefix client run preview",
-    "start": "./run-vismap.sh"
+    "start": "node scripts/start-pacmap.mjs",
+    "start:unix": "./run-pacmap.sh"
   }
 }

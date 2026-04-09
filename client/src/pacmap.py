@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-vismap - network traffic graph visualizer for kitty terminal
+pacmap - network traffic graph visualizer for kitty terminal
 nodes arranged equidistant on a circle, edges + glowing packet dots
 
 requires:
     pip install cairocffi --break-system-packages
     pip install scapy --break-system-packages
 
-run with: sudo python3 vismap.py [interface]   (default: en0)
+run with: sudo python3 pacmap.py [interface]   (default: en0)
 """
 
 import base64
@@ -143,7 +143,7 @@ def draw_frame(stdscr, nodes_snap, edges_snap, dots_snap, total):
     height, width = stdscr.getmaxyx()
 
     # Title
-    stdscr.addstr(0, 0, "VISMAP (terminal mode)")
+    stdscr.addstr(0, 0, "pacmap (terminal mode)")
     stdscr.addstr(
         1,
         0,
@@ -299,7 +299,7 @@ def render_loop(stdscr):
 
 # ── entry point ───────────────────────────────────────────────────────────────
 def main():
-    print(f"vismap starting on {IFACE} — requires sudo", flush=True)
+    print(f"pacmap starting on {IFACE} — requires sudo", flush=True)
     print("Ctrl+C to quit\n", flush=True)
     time.sleep(0.5)
 

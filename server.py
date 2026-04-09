@@ -2,9 +2,9 @@ import argparse
 import asyncio
 import json
 import os
-import subprocess
 import threading
 import time
+import webbrowser
 from collections import defaultdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -22,7 +22,11 @@ loop = None
 capture_thread = None
 capture_started = False
 capture_error = None
-iface = os.environ.get("VISMAP_IFACE", "en0")
+iface = os.environ.get("PACMAP_IFACE") or None
+
+
+def iface_label():
+    return iface or "default interface"
 
 
 def get_protocol(packet):
@@ -85,9 +89,12 @@ def packet_callback(packet):
 def start_sniff():
     global capture_error
 
-    print(f"Starting packet capture on {iface}...")
+    print(f"Starting packet capture on {iface_label()}...")
     try:
-        sniff(prn=packet_callback, store=False, filter="ip", iface=iface, promisc=False)
+        sniff_kwargs = {"prn": packet_callback, "store": False, "filter": "ip", "promisc": False}
+        if iface:
+            sniff_kwargs["iface"] = iface
+        sniff(**sniff_kwargs)
     except Exception as exc:
         capture_error = str(exc)
         print("Sniff failed:", capture_error)
@@ -96,7 +103,7 @@ def start_sniff():
                 "type": "capture_status",
                 "status": "error",
                 "message": capture_error,
-                "iface": iface,
+                "iface": iface_label(),
             }
         )
 
@@ -111,7 +118,7 @@ async def start_capture_once(websocket):
                     "type": "capture_status",
                     "status": "error",
                     "message": capture_error,
-                    "iface": iface,
+                    "iface": iface_label(),
                 }
             )
         )
@@ -119,7 +126,7 @@ async def start_capture_once(websocket):
 
     if capture_started:
         await websocket.send(
-            json.dumps({"type": "capture_status", "status": "running", "iface": iface})
+            json.dumps({"type": "capture_status", "status": "running", "iface": iface_label()})
         )
         return
 
@@ -127,7 +134,7 @@ async def start_capture_once(websocket):
     capture_thread = threading.Thread(target=start_sniff, daemon=True)
     capture_thread.start()
     await broadcast(
-        json.dumps({"type": "capture_status", "status": "running", "iface": iface})
+        json.dumps({"type": "capture_status", "status": "running", "iface": iface_label()})
     )
 
 
@@ -156,7 +163,7 @@ async def handler(websocket):
                 "type": "capture_status",
                 "status": status,
                 "message": capture_error,
-                "iface": iface,
+                "iface": iface_label(),
             }
         )
     )
@@ -210,14 +217,14 @@ async def main():
     global loop
     loop = asyncio.get_running_loop()
 
-    print(f"Starting vismap websocket on ws://127.0.0.1:8765 | iface: {iface}")
+    print(f"Starting pacmap websocket on ws://127.0.0.1:8765 | iface: {iface_label()}")
     async with websockets.serve(handler, "127.0.0.1", 8765):
         asyncio.create_task(send_nodes())
         await asyncio.Future()
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="VISMAP local packet visualizer")
+    parser = argparse.ArgumentParser(description="pacmap local packet visualizer")
     parser.add_argument("--iface", default=iface, help="Network interface to capture")
     parser.add_argument("--port", type=int, default=8080, help="Frontend HTTP port")
     parser.add_argument("--open", action="store_true", help="Open the browser automatically")
@@ -227,10 +234,7 @@ def parse_args():
 
 def open_browser(url):
     try:
-        if os.uname().sysname == "Darwin":
-            subprocess.Popen(["open", url])
-        else:
-            subprocess.Popen(["python3", "-m", "webbrowser", url])
+        webbrowser.open(url)
     except Exception as exc:
         print(f"Could not open browser automatically: {exc}")
         print(f"Open {url} manually.")
@@ -242,7 +246,7 @@ if __name__ == "__main__":
 
     start_http_server(args.port)
     url = f"http://127.0.0.1:{args.port}"
-    print(f"Serving vismap app on {url}")
+    print(f"Serving pacmap app on {url}")
     print(f"Open {url}, then click Start host capture in the browser.")
     print("Packet capture may require launching this process with sudo/admin privileges.")
 
