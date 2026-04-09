@@ -1,0 +1,25 @@
+# dependencies
+node_modules/
+venv/
+.venv/
+
+# build outputs
+client/dist/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# local logs and caches
+*.log
+.DS_Store
+.env
+.env.*
+
+# editor
+.vscode/
+.idea/
+
+# local app artifacts
+*.app/
