@@ -9,24 +9,35 @@ It renders devices as 3D nodes, links communicating devices with edges, and move
 From the repo root:
 
 ```bash
-npm start
+python3 -m venv venv
+source venv/bin/activate
+pip install websockets scapy
+npm install --prefix client
+sudo ./run-pacmap.sh
 ```
 
-The launcher will:
+The app has two pieces:
 
-- install frontend dependencies if `client/node_modules` is missing
-- start the local Python WebSocket capture server
-- start the Vite UI at `http://127.0.0.1:5173`
+- a Python WebSocket capture server, which needs `websockets` and `scapy`
+- a Vite frontend at `http://127.0.0.1:5173`
 
 Open `http://127.0.0.1:5173` in your browser, then click `Start host capture` to begin packet capture.
 
-On macOS/Linux you can also run:
+After the setup commands have been run once, start the app on macOS/Linux with:
 
 ```bash
 sudo ./run-pacmap.sh
 ```
 
-On Windows, run the terminal as Administrator and use `npm start`. Packet capture requires Npcap.
+`run-pacmap.sh` uses `venv/bin/python` when the repo venv exists, so it can find the Python packages installed above.
+
+`npm start` also exists, but it does not install Python packages and it calls `python3` directly. Use it only if the `python3` available to that command already has `websockets` and `scapy` installed:
+
+```bash
+npm start
+```
+
+On Windows, run the terminal as Administrator, install the Python packages with `pip install websockets scapy`, then use `npm start`. Packet capture requires Npcap.
 
 ## Why sudo?
 
@@ -41,7 +52,7 @@ By default, pacmap lets Scapy choose the system default capture interface.
 To capture another interface:
 
 ```bash
-npm start -- --iface en1
+sudo ./run-pacmap.sh --iface en1
 ```
 
 Common examples:
@@ -54,7 +65,7 @@ Common examples:
 ## Open The Browser Automatically
 
 ```bash
-npm start -- --open
+sudo ./run-pacmap.sh --open
 ```
 
 If macOS cannot open the browser automatically, open this URL manually:
@@ -83,6 +94,7 @@ npm run build
 Capture server only:
 
 ```bash
+source venv/bin/activate
 python3 server.py
 ```
 
