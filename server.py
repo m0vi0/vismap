@@ -220,7 +220,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="VISMAP local packet visualizer")
     parser.add_argument("--iface", default=iface, help="Network interface to capture")
     parser.add_argument("--port", type=int, default=8080, help="Frontend HTTP port")
-    parser.add_argument("--no-open", action="store_true", help="Do not open the browser")
+    parser.add_argument("--open", action="store_true", help="Open the browser automatically")
+    parser.add_argument("--no-open", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -242,10 +243,10 @@ if __name__ == "__main__":
     start_http_server(args.port)
     url = f"http://127.0.0.1:{args.port}"
     print(f"Serving vismap app on {url}")
-    print("Open the app, then click Start host capture in the browser.")
+    print(f"Open {url}, then click Start host capture in the browser.")
     print("Packet capture may require launching this process with sudo/admin privileges.")
 
-    if not args.no_open:
+    if args.open and not args.no_open:
         open_browser(url)
 
     asyncio.run(main())

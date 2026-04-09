@@ -17,9 +17,9 @@ The launcher will:
 - install frontend dependencies if `client/node_modules` is missing
 - build the React app
 - start the local Python server
-- open the UI at `http://127.0.0.1:8080`
+- serve the UI at `http://127.0.0.1:8080`
 
-In the browser, click `Start host capture` to begin packet capture.
+Open `http://127.0.0.1:8080` in your browser, then click `Start host capture` to begin packet capture.
 
 ## Why sudo?
 
@@ -43,13 +43,13 @@ Common examples:
 - Linux Ethernet: `eth0`
 - Linux Wi-Fi: `wlan0`
 
-## Run Without Opening A Browser
+## Open The Browser Automatically
 
 ```bash
-sudo ./run-vismap.sh --no-open
+sudo ./run-vismap.sh --open
 ```
 
-Then open:
+If macOS cannot open the browser automatically, open this URL manually:
 
 ```text
 http://127.0.0.1:8080
