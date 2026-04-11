@@ -8,7 +8,7 @@ import webbrowser
 from collections import defaultdict
 
 import websockets
-from scapy.all import DNS, IP, TCP, UDP, sniff
+from scapy.all import DNS, Ether, IP, TCP, UDP, sniff
 
 clients = set()
 node_data = defaultdict(lambda: {"bytes": 0, "packets": 0, "ip": ""})
@@ -60,6 +60,16 @@ def packet_callback(packet):
     dst = packet[IP].dst
     size = len(packet)
     proto = get_protocol(packet)
+    src_mac = packet[Ether].src if packet.haslayer(Ether) else None
+    dst_mac = packet[Ether].dst if packet.haslayer(Ether) else None
+    src_port = None
+    dst_port = None
+    if packet.haslayer(TCP):
+        src_port = packet[TCP].sport
+        dst_port = packet[TCP].dport
+    elif packet.haslayer(UDP):
+        src_port = packet[UDP].sport
+        dst_port = packet[UDP].dport
 
     with lock:
         node_data[src]["bytes"] += size
@@ -77,6 +87,12 @@ def packet_callback(packet):
             "size": size,
             "proto": proto,
             "timestamp": time.time(),
+            "srcIp": src,
+            "dstIp": dst,
+            "srcMac": src_mac,
+            "dstMac": dst_mac,
+            "srcPort": src_port,
+            "dstPort": dst_port,
         }
     )
 

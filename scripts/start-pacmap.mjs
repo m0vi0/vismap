@@ -32,6 +32,17 @@ function spawnChild(command, commandArgs, options = {}) {
 }
 
 function pythonCommand() {
+  const unixVenv = join(root, 'venv', 'bin', 'python')
+  const windowsVenv = join(root, 'venv', 'Scripts', 'python.exe')
+
+  if (existsSync(unixVenv)) {
+    return { command: unixVenv, args: [] }
+  }
+
+  if (existsSync(windowsVenv)) {
+    return { command: windowsVenv, args: [] }
+  }
+
   if (process.platform === 'win32') {
     return { command: 'py', args: ['-3'] }
   }

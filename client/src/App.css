@@ -154,49 +154,17 @@ button {
   background: rgba(244, 244, 245, 0.4);
 }
 
-.corner {
-  position: absolute;
-  z-index: 5;
-  width: 46px;
-  height: 46px;
-  border-color: rgba(244, 244, 245, 0.3);
-  pointer-events: none;
-}
-
-.cornerTopLeft {
-  top: 0;
-  left: 0;
-  border-top: 2px solid;
-  border-left: 2px solid;
-}
-
-.cornerTopRight {
-  top: 0;
-  right: 0;
-  border-top: 2px solid;
-  border-right: 2px solid;
-}
-
-.cornerBottomLeft {
-  bottom: 5vh;
-  left: 0;
-  border-bottom: 2px solid;
-  border-left: 2px solid;
-}
-
-.cornerBottomRight {
-  right: 0;
-  bottom: 5vh;
-  border-right: 2px solid;
-  border-bottom: 2px solid;
-}
-
 .viewport {
   position: relative;
   z-index: 2;
   width: 100%;
   height: 100%;
   overflow: hidden;
+}
+
+.viewport.tabHidden {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .canvasMount {
@@ -209,17 +177,17 @@ button {
   display: block;
   width: 100%;
   height: 100%;
-  cursor: grab;
+  cursor: crosshair;
   touch-action: none;
 }
 
 .canvasMount canvas:active {
-  cursor: grabbing;
+  cursor: crosshair;
 }
 
 .topBar {
   position: absolute;
-  top: 72px;
+  top: 112px;
   left: 22px;
   z-index: 4;
   display: flex;
@@ -287,6 +255,14 @@ p {
   padding: 10px 12px;
 }
 
+.permissionError {
+  border-left: 3px solid #facc15;
+  background: rgba(250, 204, 21, 0.1);
+  color: #f4f4f5;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+}
+
 .permissionPanel button {
   min-height: 44px;
   width: 100%;
@@ -298,9 +274,450 @@ p {
   font-weight: 820;
 }
 
+.appTabs {
+  position: absolute;
+  top: 58px;
+  left: 22px;
+  right: 22px;
+  z-index: 4;
+  display: flex;
+  min-width: 0;
+  gap: 8px;
+}
+
+.appTab {
+  min-height: 40px;
+  border: 1px solid rgba(244, 244, 245, 0.16);
+  border-radius: 8px;
+  background: rgba(8, 8, 9, 0.78);
+  color: rgba(244, 244, 245, 0.68);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 820;
+  padding: 0 13px;
+  text-transform: uppercase;
+  backdrop-filter: blur(14px);
+}
+
+.appTab.active,
+.appTab:hover,
+.appTab:focus-visible {
+  border-color: rgba(244, 244, 245, 0.52);
+  background: rgba(244, 244, 245, 0.12);
+  color: #f4f4f5;
+  outline: none;
+}
+
+.tabPage {
+  position: absolute;
+  inset: 106px 0 0;
+  z-index: 3;
+  overflow-y: auto;
+  background: #050505;
+  padding: 34px 22px 48px;
+}
+
+.tabContent {
+  width: min(720px, calc(100vw - 44px));
+  margin: 0 auto;
+  border: 1px solid rgba(244, 244, 245, 0.16);
+  border-radius: 8px;
+  background: rgba(8, 8, 9, 0.76);
+  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.36);
+  color: #f4f4f5;
+  padding: 18px;
+  backdrop-filter: blur(14px);
+}
+
+.liveWorkspacePanel,
+.replayWorkspacePanel {
+  position: absolute;
+  top: 112px;
+  left: 22px;
+  z-index: 4;
+  width: min(430px, calc(100vw - 44px));
+  max-height: calc(100dvh - 170px);
+  overflow-y: auto;
+  margin: 0;
+}
+
+.replayWorkspacePanel {
+  width: min(520px, calc(100vw - 44px));
+}
+
+.modeHeading p,
+.fieldLabel {
+  display: block;
+  margin: 0 0 6px;
+  color: rgba(244, 244, 245, 0.56);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.modeHeading h2 {
+  margin: 0 0 12px;
+  color: #f4f4f5;
+  font-size: 1.15rem;
+  line-height: 1.2;
+}
+
+.steps {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding-left: 20px;
+  color: rgba(244, 244, 245, 0.72);
+  font-size: 0.88rem;
+  line-height: 1.42;
+}
+
+.liveStatus {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.liveStatus div {
+  min-width: 0;
+  border: 1px solid rgba(244, 244, 245, 0.1);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.05);
+  padding: 8px;
+}
+
+.tabContent input:not([type="file"]) {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid rgba(244, 244, 245, 0.16);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.06);
+  color: #f4f4f5;
+  font: inherit;
+  padding: 0 11px;
+}
+
+.tabContent input:focus-visible,
+.tabContent select:focus-visible {
+  border-color: rgba(244, 244, 245, 0.66);
+  outline: none;
+}
+
+.exampleChips,
+.protocolLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.exampleChips button,
+.protocolLegend span {
+  min-height: 30px;
+  border: 1px solid rgba(244, 244, 245, 0.14);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.06);
+  color: rgba(244, 244, 245, 0.78);
+  font-size: 0.75rem;
+  font-weight: 760;
+  padding: 0 9px;
+}
+
+.exampleChips button {
+  cursor: pointer;
+}
+
+.commandBlock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.commandBlock code,
+.instructionList code {
+  overflow: hidden;
+  border: 1px solid rgba(244, 244, 245, 0.14);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.32);
+  color: #f7fbfa;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.commandBlock code {
+  min-height: 40px;
+  padding: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.instructionList code {
+  padding: 2px 5px;
+}
+
+.commandBlock button,
+.primaryAction,
+.playbackControls button,
+.playbackControls select {
+  min-height: 40px;
+  border: 1px solid rgba(244, 244, 245, 0.22);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.08);
+  color: #f4f4f5;
+  cursor: pointer;
+  font-weight: 820;
+  padding: 0 12px;
+}
+
+.primaryAction {
+  width: 100%;
+  margin-top: 12px;
+  border-color: transparent;
+  background: #f4f4f5;
+  color: #050505;
+}
+
+.commandBlock button:hover,
+.commandBlock button:focus-visible,
+.primaryAction:hover,
+.primaryAction:focus-visible,
+.playbackControls button:hover,
+.playbackControls button:focus-visible {
+  border-color: rgba(244, 244, 245, 0.66);
+  outline: none;
+}
+
+.noteText,
+.instructionList p {
+  margin: 10px 0 0;
+  color: rgba(244, 244, 245, 0.66);
+  font-size: 0.84rem;
+  line-height: 1.48;
+}
+
+.uploadZone {
+  position: relative;
+  display: grid;
+  min-height: 118px;
+  place-items: center;
+  gap: 6px;
+  border: 1px dashed rgba(244, 244, 245, 0.28);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.05);
+  color: rgba(244, 244, 245, 0.72);
+  cursor: pointer;
+  padding: 16px;
+  text-align: center;
+}
+
+.uploadZone input {
+  position: absolute;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+}
+
+.uploadZone strong {
+  color: #f4f4f5;
+}
+
+.uploadZone span {
+  font-size: 0.84rem;
+  line-height: 1.4;
+}
+
+.replayStats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.replayStats div {
+  min-width: 0;
+  border: 1px solid rgba(244, 244, 245, 0.1);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.05);
+  padding: 8px;
+}
+
+.replayStats dd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playbackControls {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 8px;
+}
+
+.playbackControls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.timeline {
+  width: 100%;
+  margin-top: 12px;
+  accent-color: #f4f4f5;
+}
+
+.playButton {
+  font-size: 0.95rem;
+}
+
+.analysisPanel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.analysisPanel section {
+  min-width: 0;
+  border: 1px solid rgba(244, 244, 245, 0.1);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.05);
+  padding: 10px;
+}
+
+.analysisPanel h3,
+.rankHeader p,
+.rankHeader h2 {
+  margin: 0;
+}
+
+.analysisPanel h3 {
+  margin-bottom: 8px;
+  color: #f4f4f5;
+  font-size: 0.86rem;
+}
+
+.labelModeGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.labelModeGrid button,
+.miniRows button,
+.miniRows span {
+  min-height: 30px;
+  border: 1px solid rgba(244, 244, 245, 0.12);
+  border-radius: 8px;
+  background: rgba(8, 8, 9, 0.58);
+  color: rgba(244, 244, 245, 0.78);
+  cursor: pointer;
+  font-size: 0.72rem;
+  padding: 0 8px;
+}
+
+.labelModeGrid button.active,
+.labelModeGrid button:hover,
+.miniRows button:hover {
+  border-color: rgba(244, 244, 245, 0.58);
+  color: #f4f4f5;
+}
+
+.miniRows {
+  display: grid;
+  gap: 6px;
+}
+
+.miniRows span,
+.miniRows button {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.miniRows i {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.ioTimeline {
+  display: grid;
+  height: 48px;
+  grid-template-columns: repeat(40, minmax(2px, 1fr));
+  align-items: end;
+  gap: 2px;
+}
+
+.ioTimeline i {
+  display: block;
+  min-height: 4px;
+  border-radius: 4px 4px 0 0;
+  background: #60a5fa;
+}
+
+.protocolLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.protocolLegend i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.graphToolbar {
+  position: absolute;
+  top: 112px;
+  right: 22px;
+  z-index: 4;
+  display: flex;
+  max-width: min(620px, calc(100vw - 44px));
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.graphToolbar button,
+.graphToolbar select,
+.graphToolbar span {
+  min-height: 38px;
+  border: 1px solid rgba(244, 244, 245, 0.12);
+  border-radius: 8px;
+  background: rgba(8, 8, 9, 0.66);
+  color: rgba(244, 244, 245, 0.82);
+  font-size: 0.76rem;
+  font-weight: 760;
+  padding: 0 10px;
+  backdrop-filter: blur(12px);
+}
+
+.graphToolbar button,
+.graphToolbar select {
+  cursor: pointer;
+}
+
+.graphToolbar button:hover,
+.graphToolbar select:focus-visible,
+.graphToolbar button:focus-visible {
+  border-color: rgba(244, 244, 245, 0.58);
+  outline: none;
+}
+
+.graphToolbar span {
+  display: inline-flex;
+  align-items: center;
+  color: rgba(244, 244, 245, 0.62);
+}
+
 .drawerToggle {
   position: absolute;
-  top: 72px;
+  top: 162px;
   right: 22px;
   z-index: 4;
   display: inline-flex;
@@ -356,7 +773,7 @@ p {
 
 .deviceDrawer {
   position: absolute;
-  top: 124px;
+  top: 214px;
   right: 22px;
   bottom: 72px;
   z-index: 4;
@@ -550,11 +967,290 @@ dd {
   outline: none;
 }
 
+.statsDrawer {
+  position: absolute;
+  right: 22px;
+  bottom: 18px;
+  left: 22px;
+  z-index: 4;
+  max-height: min(38dvh, 360px);
+  overflow: hidden;
+  border: 1px solid rgba(244, 244, 245, 0.16);
+  border-radius: 8px;
+  background: rgba(8, 8, 9, 0.82);
+  box-shadow: 0 -18px 56px rgba(0, 0, 0, 0.36);
+  transform: translateY(calc(100% - 52px));
+  transition: transform 180ms ease;
+  backdrop-filter: blur(14px);
+}
+
+.statsDrawer.open {
+  transform: translateY(0);
+}
+
+.statsHeader {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid rgba(244, 244, 245, 0.1);
+  padding: 10px 14px;
+}
+
+.statsHeader p {
+  margin: 0 0 3px;
+  color: rgba(244, 244, 245, 0.56);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.statsHeader h2 {
+  margin: 0;
+  color: #f4f4f5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.94rem;
+  line-height: 1.2;
+}
+
+.statsHeader button {
+  min-height: 32px;
+  border: 1px solid rgba(244, 244, 245, 0.22);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.08);
+  color: #f4f4f5;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0 10px;
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  overflow-y: auto;
+  max-height: calc(min(38dvh, 360px) - 52px);
+  padding: 12px 14px 14px;
+}
+
+.statsGrid section {
+  min-width: 0;
+}
+
+.statsGrid h3 {
+  margin: 0 0 9px;
+  color: rgba(244, 244, 245, 0.86);
+  font-size: 0.86rem;
+}
+
+.statsGrid dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.statsGrid dl div {
+  min-width: 0;
+  border: 1px solid rgba(244, 244, 245, 0.1);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.05);
+  padding: 8px;
+}
+
+.statsRows {
+  display: grid;
+  gap: 6px;
+}
+
+.statsRow {
+  display: grid;
+  min-height: 34px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(244, 244, 245, 0.1);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.05);
+  color: #f4f4f5;
+  cursor: pointer;
+  padding: 7px 8px;
+  text-align: left;
+}
+
+.statsRow:hover,
+.statsRow:focus-visible,
+.statsRow.selected {
+  border-color: rgba(244, 244, 245, 0.58);
+  outline: none;
+}
+
+.statsRow span {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(244, 244, 245, 0.82);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statsRow strong {
+  color: #d8d8dc;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.conversationRank {
+  position: absolute;
+  right: 22px;
+  bottom: 18px;
+  left: 22px;
+  z-index: 4;
+  max-height: min(34dvh, 320px);
+  overflow: hidden;
+  border: 1px solid rgba(244, 244, 245, 0.16);
+  border-radius: 8px;
+  background: rgba(8, 8, 9, 0.84);
+  box-shadow: 0 -18px 56px rgba(0, 0, 0, 0.36);
+  transform: translateY(calc(100% - 54px));
+  transition: transform 180ms ease;
+  backdrop-filter: blur(14px);
+}
+
+.conversationRank.open {
+  transform: translateY(0);
+}
+
+.rankHeader {
+  display: grid;
+  min-height: 54px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(244, 244, 245, 0.1);
+  padding: 10px 14px;
+}
+
+.rankHeader p {
+  color: rgba(244, 244, 245, 0.56);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.rankHeader h2 {
+  margin-top: 3px;
+  color: #f4f4f5;
+  font-size: 0.94rem;
+}
+
+.rankHeader button,
+.rankHeader select {
+  min-height: 32px;
+  border: 1px solid rgba(244, 244, 245, 0.22);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.08);
+  color: #f4f4f5;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 0 10px;
+}
+
+.rankRows {
+  display: grid;
+  gap: 6px;
+  overflow-y: auto;
+  max-height: calc(min(34dvh, 320px) - 54px);
+  padding: 10px 14px 14px;
+}
+
+.rankRow {
+  display: grid;
+  min-height: 34px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(244, 244, 245, 0.1);
+  border-radius: 8px;
+  background: rgba(244, 244, 245, 0.05);
+  color: #f4f4f5;
+  cursor: pointer;
+  padding: 7px 9px;
+  text-align: left;
+}
+
+.rankRow:hover,
+.rankRow:focus-visible {
+  border-color: rgba(244, 244, 245, 0.58);
+  outline: none;
+}
+
+.rankRow span {
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rankRow strong,
+.rankRow em {
+  color: #d8d8dc;
+  font-size: 0.76rem;
+  font-style: normal;
+  white-space: nowrap;
+}
+
 @media (max-width: 760px) {
+  .appTabs {
+    top: 56px;
+    right: 12px;
+    left: 12px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+
+  .appTab {
+    flex: 0 0 auto;
+  }
+
+  .tabPage {
+    inset: 106px 0 0;
+    padding: 18px 12px 34px;
+  }
+
+  .tabContent {
+    width: 100%;
+    padding: 14px;
+  }
+
+  .liveWorkspacePanel,
+  .replayWorkspacePanel {
+    top: 106px;
+    left: 12px;
+    width: calc(100vw - 24px);
+    max-height: 42dvh;
+  }
+
   .topBar {
-    top: 14px;
+    top: 112px;
     left: 14px;
     right: 14px;
+  }
+
+  .graphToolbar {
+    top: auto;
+    right: 12px;
+    bottom: 74px;
+    left: 12px;
+    max-width: none;
   }
 
   .drawerToggle {
@@ -564,7 +1260,7 @@ dd {
 
   .wholeNetworkButton {
     right: 12px;
-    bottom: 12px;
+    bottom: 132px;
   }
 
   .deviceDrawer {
@@ -579,6 +1275,38 @@ dd {
 
   .deviceDrawer.open {
     transform: translateY(0);
+  }
+
+  .statsDrawer {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    max-height: 58dvh;
+  }
+
+  .statsGrid {
+    grid-template-columns: 1fr;
+    max-height: calc(58dvh - 52px);
+  }
+
+  .analysisPanel {
+    grid-template-columns: 1fr;
+  }
+
+  .conversationRank {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    max-height: 48dvh;
+  }
+
+  .rankHeader,
+  .rankRow {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rankRows {
+    max-height: calc(48dvh - 54px);
   }
 
   .panel {

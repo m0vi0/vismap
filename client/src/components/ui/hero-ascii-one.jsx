@@ -21,11 +21,6 @@ export default function HeroAsciiOne({ children }) {
         </div>
       </div>
 
-      <div className="corner cornerTopLeft" />
-      <div className="corner cornerTopRight" />
-      <div className="corner cornerBottomLeft" />
-      <div className="corner cornerBottomRight" />
-
       {children}
     </main>
   )
