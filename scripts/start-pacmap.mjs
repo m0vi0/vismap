@@ -7,7 +7,7 @@ import { dirname } from 'node:path'
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const clientDir = join(root, 'client')
 const args = process.argv.slice(2)
-const appUrl = 'http://127.0.0.1:5173'
+const appUrl = 'http://127.0.0.1:5176'
 const children = []
 
 function spawnChild(command, commandArgs, options = {}) {
@@ -72,5 +72,5 @@ function start() {
   const serverArgs = [...python.args, 'server.py', '--app-url', appUrl, ...args]
 
   spawnChild(python.command, serverArgs)
-  spawnChild('npm', ['run', 'dev', '--', '--host', '127.0.0.1'], { cwd: clientDir })
+  spawnChild('npm', ['run', 'dev', '--', '--host', '127.0.0.1', '--port', '5176'], { cwd: clientDir })
 }
