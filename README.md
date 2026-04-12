@@ -4,7 +4,6 @@ PacMap is a local packet visualizer for live traffic mapping and PCAP replay.
 
 It shows hosts as nodes, communication as edges, and packet activity as pulses moving across a stable top-down network map. It is intended for troubleshooting, packet investigation, homelab visibility, and understanding communication patterns. It is not an IDS or threat detection platform.
 
-## GIF
 ![pacmap demo](demo.gif)
 
 ## Input Modes
@@ -162,8 +161,8 @@ python3 server.py --iface en0
 - If a PCAP loads with many skipped packets, it may use an unsupported link type, encrypted/non-IP traffic, or packet types PacMap does not yet summarize.
 
 ## Tech
-
 - React + Vite
 - Three.js
 - Python WebSocket server
 - Scapy packet capture
+- MediaPipe Hands (gesture navigation)
