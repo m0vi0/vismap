@@ -1516,19 +1516,58 @@ export default function App() {
       // cull labels by distance — only show closest 8 nodes
       const MAX_VISIBLE_LABELS = 8
       const cameraPos = camera.position
-      const nodesByDistance = [...nodeStore.values()]
-        .filter(n => n.group.visible)
-        .map(n => ({
-          node: n,
-          dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
-        }))
-        .sort((a, b) => a.dist - b.dist)
+      const selected = selectedIpRef.current
 
-      nodesByDistance.forEach(({ node }, index) => {
-        const withinLimit = index < MAX_VISIBLE_LABELS
-        const isSelected = node.ip === selectedIpRef.current
-        node.label.visible = showLabelsRef.current && (withinLimit || isSelected)
-      })
+      if (selected && nodeStore.has(selected)) {
+        // subcluster mode — cull within neighborhood only
+        const adjacency = new Map()
+        edgeStore.forEach((edge) => {
+          if (!adjacency.has(edge.src)) adjacency.set(edge.src, new Set())
+          if (!adjacency.has(edge.dst)) adjacency.set(edge.dst, new Set())
+          adjacency.get(edge.src).add(edge.dst)
+          adjacency.get(edge.dst).add(edge.src)
+        })
+        const neighbors = new Set([selected, ...(adjacency.get(selected) || [])])
+
+        const subclusterByDistance = [...nodeStore.values()]
+          .filter(n => n.group.visible && neighbors.has(n.ip))
+          .map(n => ({
+            node: n,
+            dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
+          }))
+          .sort((a, b) => a.dist - b.dist)
+
+        const outsideByDistance = [...nodeStore.values()]
+          .filter(n => n.group.visible && !neighbors.has(n.ip))
+          .map(n => ({
+            node: n,
+            dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
+          }))
+          .sort((a, b) => a.dist - b.dist)
+
+        subclusterByDistance.forEach(({ node }, index) => {
+          node.label.visible = showLabelsRef.current && index < MAX_VISIBLE_LABELS
+        })
+
+        // hide all labels outside subcluster
+        outsideByDistance.forEach(({ node }) => {
+          node.label.visible = false
+        })
+
+      } else {
+        // global mode — cull across all visible nodes
+        const nodesByDistance = [...nodeStore.values()]
+          .filter(n => n.group.visible)
+          .map(n => ({
+            node: n,
+            dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
+          }))
+          .sort((a, b) => a.dist - b.dist)
+
+        nodesByDistance.forEach(({ node }, index) => {
+          node.label.visible = showLabelsRef.current && index < MAX_VISIBLE_LABELS
+        })
+      }
 
       nodeStore.forEach((node) => {
         node.label.quaternion.copy(camera.quaternion)
