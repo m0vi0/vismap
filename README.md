@@ -4,6 +4,9 @@ PacMap is a local packet visualizer for live traffic mapping and PCAP replay.
 
 It shows hosts as nodes, communication as edges, and packet activity as pulses moving across a stable top-down network map. It is intended for troubleshooting, packet investigation, homelab visibility, and understanding communication patterns. It is not an IDS or threat detection platform.
 
+## GIF
+![pacmap demo](demo.gif)
+
 ## Input Modes
 
 PacMap supports two workflows in the web app:
@@ -120,8 +123,6 @@ Open your hand in Pointer mode to clear the selected node and return to normal p
 
 If tracking is temporarily lost in Pointer mode, PacMap pauses at the last stable pointer/view state. It does not reset the cluster, camera orientation, or current context.
 
-##GIF
-![pacmap demo](demo.gif)
 
 ## Development
 
