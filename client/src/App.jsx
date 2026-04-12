@@ -6,18 +6,20 @@ import './App.css'
 const WS_URL = 'ws://127.0.0.1:8765'
 const MAX_PACKET_PARTICLES = 420
 const NODE_LIMIT = 18
-const FOCUS_RING_RADIUS = 92
-const FOCUS_RING_MAX_RADIUS = 360
-const NETWORK_RING_RADII = [0, 112, 205, 305]
-const NETWORK_RING_MAX_RADII = [0, 210, 380, 560]
-const NETWORK_RING_PADDING = 1.22
-const NETWORK_RING_SEPARATION = 92
-const NODE_RING_GAP = 18
-const MIN_NODE_SCALE = 0.24
-const REPLAY_TICK_MS = 40
+const LIVE_PACKET_HISTORY_LIMIT = 2000
+const LIVE_PACKET_UI_FLUSH_MS = 250
+const ANALYSIS_PACKET_WINDOW = 2000
+const TABLE_ROW_LIMIT = 120
+const LARGE_TABLE_ROW_LIMIT = 200
+const TARGET_PIXEL_TOLERANCE = 42
+const REPLAY_TICK_MS = 80
 const MIN_CAMERA_ZOOM = 0.55
 const MAX_CAMERA_ZOOM = 2.5
 const DEFAULT_CAMERA_ZOOM = 1
+const ORBIT_TARGET = new THREE.Vector3(0, 0, -140)
+const MIN_LAYOUT_SPREAD = 0.5
+const MAX_LAYOUT_SPREAD = 2.25
+const PAN_BOUND = 320
 
 const PROTOCOLS = {
   TCP: { color: 0x60a5fa, css: '#60a5fa', label: 'TCP' },
@@ -29,16 +31,11 @@ const PROTOCOLS = {
 
 const TABS = {
   live: 'Live Capture',
-  replay: 'Replay PCAP',
-  instructions: 'Instructions',
-}
-
-const LABEL_MODES = {
-  resolvedIp: 'Resolved IP',
-  rawIp: 'Raw IP',
-  rawMac: 'MAC',
-  resolvedMac: 'Resolved MAC',
-  off: 'Labels off',
+  stats: 'Whole Network Stats',
+  conversations: 'Conversations',
+  endpoints: 'Endpoints',
+  protocols: 'Protocol Hierarchy',
+  io: 'I/O Graphs',
 }
 
 const LINKTYPE_NAMES = {
@@ -49,19 +46,12 @@ const LINKTYPE_NAMES = {
   276: 'Linux cooked v2',
 }
 
-const MODE_COPY = {
-  live: {
-    title: 'Live Capture',
-    body: 'Inspect what is happening right now. A local terminal process captures packets and streams them into this map.',
-  },
-  replay: {
-    title: 'Replay PCAP',
-    body: 'Inspect a saved capture over time. Upload a .pcap or .pcapng file and replay the packet flow here.',
-  },
-  instructions: {
-    title: 'Instructions',
-    body: 'Use PacMap as a packet visualizer and replay aid for troubleshooting, investigation, and homelab visibility.',
-  },
+const LABEL_MODES = {
+  resolvedIp: 'Resolved IP',
+  rawIp: 'Raw IP',
+  rawMac: 'MAC',
+  resolvedMac: 'Resolved MAC',
+  off: 'Labels off',
 }
 
 function byteLabel(bytes) {
@@ -84,6 +74,10 @@ function normalizeTimestamp(timestamp, fallback) {
   return Number.isFinite(value) ? value : fallback
 }
 
+function packetId(source, index) {
+  return `${source}-${index}`
+}
+
 function makePacket(src, dst, size, proto, timestamp, metadata = {}) {
   return {
     type: 'packet',
@@ -94,6 +88,69 @@ function makePacket(src, dst, size, proto, timestamp, metadata = {}) {
     timestamp,
     ...metadata,
   }
+}
+
+function normalizePacket(packet, source, index) {
+  return {
+    id: packet.id || packetId(source, index),
+    timestamp: Number.isFinite(Number(packet.timestamp)) ? Number(packet.timestamp) : Date.now() / 1000,
+    size: Number(packet.size) || 0,
+    proto: String(packet.proto || 'OTHER').toUpperCase(),
+    ...packet,
+  }
+}
+
+function parseDisplayFilter(expression) {
+  const raw = expression.trim()
+  if (!raw) return { raw, type: 'all' }
+
+  const lower = raw.toLowerCase()
+  if (['tcp', 'udp', 'dns', 'http', 'arp', 'other'].includes(lower)) {
+    return { raw, type: 'protocol', value: lower.toUpperCase() }
+  }
+
+  const match = lower.match(/^(ip\.addr|ip\.src|ip\.dst|tcp\.port|udp\.port|port)\s*==\s*([a-z0-9:.:-]+)$/i)
+  if (!match) throw new Error('Unsupported filter. Try tcp, dns, ip.addr == 192.168.1.10, or tcp.port == 443.')
+
+  const [, field, value] = match
+  if (field.endsWith('port') || field === 'port') {
+    const port = Number(value)
+    if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('Port filters need a value from 0 to 65535.')
+    return { raw, type: 'field', field, value: port }
+  }
+
+  return { raw, type: 'field', field, value }
+}
+
+function packetMatchesFilter(packet, filter) {
+  if (!filter || filter.type === 'all') return true
+  const proto = String(packet.proto || '').toUpperCase()
+  const src = packet.srcIp || packet.src
+  const dst = packet.dstIp || packet.dst
+  const srcPort = Number(packet.srcPort)
+  const dstPort = Number(packet.dstPort)
+
+  if (filter.type === 'protocol') {
+    if (filter.value === 'HTTP') return proto === 'TCP' && [80, 8000, 8080].includes(srcPort || dstPort)
+    return proto === filter.value
+  }
+
+  if (filter.field === 'ip.addr') return src === filter.value || dst === filter.value
+  if (filter.field === 'ip.src') return src === filter.value
+  if (filter.field === 'ip.dst') return dst === filter.value
+  if (filter.field === 'tcp.port') return proto === 'TCP' && (srcPort === filter.value || dstPort === filter.value)
+  if (filter.field === 'udp.port') return proto === 'UDP' && (srcPort === filter.value || dstPort === filter.value)
+  if (filter.field === 'port') return srcPort === filter.value || dstPort === filter.value
+  return true
+}
+
+function packetInfo(packet) {
+  const proto = packet.proto || 'OTHER'
+  const ports = packet.srcPort || packet.dstPort ? ` ${packet.srcPort || '?'} -> ${packet.dstPort || '?'}` : ''
+  if (proto === 'DNS') return `DNS${ports}`
+  if (proto === 'TCP' || proto === 'UDP') return `${proto}${ports}`
+  if (proto === 'ARP') return 'ARP who-has / is-at'
+  return proto
 }
 
 function formatMac(view, offset) {
@@ -518,45 +575,22 @@ function isPrivateIpv4(ip) {
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
 }
 
-function isGatewayCandidate(ip) {
-  const parts = parseIpv4(ip)
-  return Boolean(parts && isPrivateIpv4(ip) && parts[3] === 1)
-}
-
-function isSpecialIpv4(ip) {
-  const parts = parseIpv4(ip)
-  if (!parts) return true
-
-  const [a, b, , d] = parts
-  return (
-    a === 0 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a >= 224 && a <= 239) ||
-    ip === '255.255.255.255' ||
-    d === 255
-  )
-}
-
-function isLanUnicast(ip) {
-  return isPrivateIpv4(ip) && !isSpecialIpv4(ip)
-}
-
-function makeTextSprite(text, accent = '#d8d8dc') {
+function makeTextSprite(text) {
   const canvas = document.createElement('canvas')
   canvas.width = 768
   canvas.height = 192
 
   const ctx = canvas.getContext('2d')
   ctx.clearRect(0, 0, canvas.width, canvas.height)
-  ctx.font = '800 50px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'
+  ctx.font = '500 62px "SF Mono", "Roboto Mono", "IBM Plex Mono", ui-monospace, monospace'
   ctx.textAlign = 'center'
   ctx.textBaseline = 'middle'
-  ctx.fillStyle = 'rgba(6, 6, 7, 0.94)'
-  ctx.fillRect(24, 42, 720, 108)
-  ctx.strokeStyle = accent
-  ctx.lineWidth = 4
-  ctx.strokeRect(24, 42, 720, 108)
+  ctx.lineWidth = 5
+  ctx.strokeStyle = 'rgba(5, 5, 5, 0.86)'
+  ctx.strokeText(text, 384, 96)
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.88)'
+  ctx.shadowBlur = 8
+  ctx.shadowOffsetY = 2
   ctx.fillStyle = '#f7fbfa'
   ctx.fillText(text, 384, 96)
 
@@ -564,12 +598,12 @@ function makeTextSprite(text, accent = '#d8d8dc') {
   texture.colorSpace = THREE.SRGBColorSpace
   const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false })
   const sprite = new THREE.Sprite(material)
-  sprite.scale.set(112, 28, 1)
+  sprite.scale.set(150, 38, 1)
   return sprite
 }
 
-function updateTextSprite(sprite, text, accent = '#d8d8dc') {
-  const nextSprite = makeTextSprite(text, accent)
+function updateTextSprite(sprite, text) {
+  const nextSprite = makeTextSprite(text)
   const previousMap = sprite.material.map
   sprite.material.map = nextSprite.material.map
   sprite.material.needsUpdate = true
@@ -577,23 +611,44 @@ function updateTextSprite(sprite, text, accent = '#d8d8dc') {
   nextSprite.material.dispose()
 }
 
-function setCylinderBetween(mesh, start, end, radius) {
-  const direction = new THREE.Vector3().subVectors(end, start)
-  const length = Math.max(direction.length(), 0.1)
-  const midpoint = new THREE.Vector3().addVectors(start, end).multiplyScalar(0.5)
-
-  mesh.position.copy(midpoint)
-  mesh.scale.set(radius, length, radius)
-  mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize())
-}
-
 function randomPosition(index) {
   const angle = index * 2.399963
-  const radius = 95 + (index % 5) * 19
+  const tilt = index * 1.734 + 0.72
+  const radius = 120 + (index % 11) * 17
   return {
-    x: Math.cos(angle) * radius,
-    y: ((index % 7) - 3) * 20,
-    z: Math.sin(angle) * radius,
+    x: Math.cos(angle) * Math.sin(tilt) * radius,
+    y: Math.cos(tilt) * radius * 0.82,
+    z: Math.sin(angle) * Math.sin(tilt) * radius,
+  }
+}
+
+function hashString(value) {
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return hash >>> 0
+}
+
+function subnetKey(ip) {
+  if (isPrivateIpv4(ip)) return ip.split('.').slice(0, 3).join('.')
+  if (ip.includes(':')) return ip.split(':').slice(0, 4).join(':')
+  if (ip.includes('.')) return ip.split('.').slice(0, 2).join('.')
+  return ip
+}
+
+function clusterAnchor(ip) {
+  const hash = hashString(subnetKey(ip))
+  const theta = ((hash & 0xffff) / 0xffff) * Math.PI * 2
+  const z = (((hash >>> 16) & 0xffff) / 0xffff) * 2 - 1
+  const radius = 135
+  const ring = Math.sqrt(Math.max(0, 1 - z * z))
+
+  return {
+    x: Math.cos(theta) * ring * radius,
+    y: z * radius,
+    z: Math.sin(theta) * ring * radius,
   }
 }
 
@@ -602,7 +657,7 @@ function nodeMass(node) {
 }
 
 function nodeRadius(node) {
-  return THREE.MathUtils.clamp(8 + nodeMass(node) * 2.1, 10, 27)
+  return THREE.MathUtils.clamp(1.45 + nodeMass(node) * 0.18, 1.7, 3.1)
 }
 
 function nodeRenderScale(node) {
@@ -614,85 +669,11 @@ function renderedNodeRadius(node) {
 }
 
 function pulseRadius(node) {
-  return THREE.MathUtils.clamp(node.recentBytes / 4500, 0, 1.8) * 8
+  return THREE.MathUtils.clamp(node.recentBytes / 4500, 0, 1.4) * 1.2
 }
 
 function collisionNodeRadius(node) {
   return renderedNodeRadius(node) + pulseRadius(node)
-}
-
-function ringCapacityScale(nodes, radius) {
-  if (nodes.length <= 1 || radius <= 0) return 1
-
-  const requiredArc = nodes.reduce(
-    (total, node) => total + nodeRadius(node) * 2 + NODE_RING_GAP,
-    0,
-  )
-  const availableArc = Math.PI * 2 * radius
-
-  return THREE.MathUtils.clamp(availableArc / Math.max(requiredArc, 1), MIN_NODE_SCALE, 1)
-}
-
-function requiredRingRadius(nodes) {
-  if (nodes.length <= 1) return 0
-
-  const requiredArc = nodes.reduce(
-    (total, node) => total + nodeRadius(node) * 2 + NODE_RING_GAP,
-    0,
-  )
-
-  return (requiredArc * NETWORK_RING_PADDING) / (Math.PI * 2)
-}
-
-function flatRingPosition(index, count, radius, yOffset = 0) {
-  if (radius === 0) return new THREE.Vector3(0, yOffset, 0)
-
-  const angle = (index / Math.max(count, 1)) * Math.PI * 2 - Math.PI / 2
-
-  return new THREE.Vector3(
-    Math.cos(angle) * radius,
-    yOffset,
-    Math.sin(angle) * radius,
-  )
-}
-
-function makeRingGuide(radius, yOffset) {
-  const points = []
-  const segments = 160
-
-  for (let index = 0; index <= segments; index += 1) {
-    const angle = (index / segments) * Math.PI * 2
-    points.push(new THREE.Vector3(Math.cos(angle) * radius, yOffset, Math.sin(angle) * radius))
-  }
-
-  const geometry = new THREE.BufferGeometry().setFromPoints(points)
-  const material = new THREE.LineBasicMaterial({
-    color: 0xf4f4f5,
-    transparent: true,
-    opacity: 0.12,
-  })
-
-  const guide = new THREE.Line(geometry, material)
-  guide.userData.radius = radius
-  guide.userData.yOffset = yOffset
-  return guide
-}
-
-function updateRingGuide(guide, radius, yOffset) {
-  if (guide.userData.radius === radius && guide.userData.yOffset === yOffset) return
-
-  const points = []
-  const segments = 160
-
-  for (let index = 0; index <= segments; index += 1) {
-    const angle = (index / segments) * Math.PI * 2
-    points.push(new THREE.Vector3(Math.cos(angle) * radius, yOffset, Math.sin(angle) * radius))
-  }
-
-  guide.geometry.dispose()
-  guide.geometry = new THREE.BufferGeometry().setFromPoints(points)
-  guide.userData.radius = radius
-  guide.userData.yOffset = yOffset
 }
 
 export default function App() {
@@ -700,37 +681,70 @@ export default function App() {
   const nodesRef = useRef(new Map())
   const edgesRef = useRef(new Map())
   const packetsRef = useRef([])
+  const livePacketsRef = useRef([])
+  const livePacketFlushRef = useRef(null)
   const frameRef = useRef(0)
   const websocketRef = useRef(null)
   const selectedIpRef = useRef(null)
   const appModeRef = useRef('live')
+  const activeSourceRef = useRef('live')
+  const activeFilterRef = useRef({ raw: '', type: 'all' })
+  const filteredPacketsRef = useRef([])
   const showLabelsRef = useRef(true)
   const labelModeRef = useRef('resolvedIp')
+  const cameraZoomRef = useRef(DEFAULT_CAMERA_ZOOM)
   const hostnamesRef = useRef(new Map())
   const macNamesRef = useRef(new Map())
   const cameraRef = useRef(null)
+  const pointTargetRef = useRef({ active: false, ip: null, x: 0, y: 0 })
+  const pointerLockedIpRef = useRef(null)
+  const orbitStateRef = useRef({
+    isPointerDown: false, lastX: 0, lastY: 0,
+    theta: Math.PI * 0.18, phi: Math.PI * 0.28, radius: 820,
+    panX: 0, panY: 0, panZ: 0,
+    recenterPan: false,
+    target: ORBIT_TARGET.clone(),
+  })
+  const applyOrbitRef = useRef(null)
+  const layoutSpreadRef = useRef({ value: 1, target: 1 })
   const ingestPacketRef = useRef(null)
   const resetGraphRef = useRef(null)
   const snapshotGraphRef = useRef(null)
+  const rebuildGraphRef = useRef(null)
 
+  const [gesturesEnabled, setGesturesEnabled] = useState(true)
+  const gestureCleanupRef = useRef(null)
+  const [pointReticle, setPointReticle] = useState({
+    active: false,
+    locked: false,
+    x: 50,
+    y: 50,
+    lockKind: null,
+    lockProgress: 0,
+    mode: 'zoom',
+  })
   const [activeTab, setActiveTab] = useState('live')
+  const [menuCollapsed, setMenuCollapsed] = useState(false)
   const [appMode, setAppMode] = useState('live')
+  const [activeSource, setActiveSource] = useState('live')
+  const [filterInput, setFilterInput] = useState('')
+  const [activeFilter, setActiveFilter] = useState({ raw: '', type: 'all' })
+  const [filterError, setFilterError] = useState('')
   const [cameraZoom, setCameraZoom] = useState(DEFAULT_CAMERA_ZOOM)
   const [showLabels, setShowLabels] = useState(true)
   const [labelMode, setLabelMode] = useState('resolvedIp')
-  const [nodes, setNodes] = useState([])
-  const [edges, setEdges] = useState([])
+  const [, setNodes] = useState([])
+  const [, setEdges] = useState([])
   const [status, setStatus] = useState('connecting')
   const [captureMessage, setCaptureMessage] = useState('')
   const [captureInterface, setCaptureInterface] = useState('en0')
-  const [copiedCommand, setCopiedCommand] = useState(false)
   const [selectedIp, setSelectedIp] = useState(null)
-  const [isDeviceDrawerOpen, setIsDeviceDrawerOpen] = useState(false)
-  const [isStatsDrawerOpen, setIsStatsDrawerOpen] = useState(false)
-  const [isConversationRankOpen, setIsConversationRankOpen] = useState(true)
-  const [isWorkflowPanelOpen, setIsWorkflowPanelOpen] = useState(true)
-  const [conversationSort, setConversationSort] = useState('bytes')
+  const [selectedConversationKey, setSelectedConversationKey] = useState(null)
+  const [selectedProtocol, setSelectedProtocol] = useState(null)
+  const [selectedPacketId, setSelectedPacketId] = useState(null)
+  const conversationSort = 'bytes'
   const [replayPackets, setReplayPackets] = useState([])
+  const [livePackets, setLivePackets] = useState([])
   const [replayMeta, setReplayMeta] = useState(null)
   const [replayState, setReplayState] = useState('idle')
   const [replayIndex, setReplayIndex] = useState(0)
@@ -738,52 +752,22 @@ export default function App() {
   const [replaySpeed, setReplaySpeed] = useState(1)
   const [replayError, setReplayError] = useState('')
 
-  const liveCommand = useMemo(() => {
-    const iface = captureInterface.trim()
-    return `npm start${iface ? ` -- --iface ${iface}` : ''}`
-  }, [captureInterface])
+  const sourcePackets = useMemo(() => {
+    if (activeSource === 'replay') return replayPackets.slice(Math.max(0, replayIndex - ANALYSIS_PACKET_WINDOW), replayIndex)
+    return livePackets.slice(-ANALYSIS_PACKET_WINDOW)
+  }, [activeSource, livePackets, replayIndex, replayPackets])
 
-  const selectedNode = useMemo(
-    () => nodes.find((node) => node.ip === selectedIp),
-    [nodes, selectedIp],
+  const filteredPackets = useMemo(
+    () => sourcePackets.filter((packet) => packetMatchesFilter(packet, activeFilter)),
+    [activeFilter, sourcePackets],
   )
 
-  const selectedNeighborhood = useMemo(() => {
-    if (!selectedIp) return { oneHop: [] }
-
-    const adjacency = new Map()
-    edges.forEach((edge) => {
-      if (!adjacency.has(edge.src)) adjacency.set(edge.src, new Set())
-      if (!adjacency.has(edge.dst)) adjacency.set(edge.dst, new Set())
-      adjacency.get(edge.src).add(edge.dst)
-      adjacency.get(edge.dst).add(edge.src)
-    })
-
-    return { oneHop: [...(adjacency.get(selectedIp) || [])].sort() }
-  }, [edges, selectedIp])
-
-  const visibleEdges = useMemo(() => {
-    if (!selectedIp) return edges
-    return edges.filter((edge) => edge.src === selectedIp || edge.dst === selectedIp)
-  }, [edges, selectedIp])
-
-  const networkStats = useMemo(() => {
-    const totalBytes = nodes.reduce((total, node) => total + node.bytes, 0)
-    const totalPackets = nodes.reduce((total, node) => total + node.packets, 0)
-    return {
-      totalBytes,
-      totalPackets,
-      hosts: nodes.length,
-      links: edges.length,
-    }
-  }, [edges.length, nodes])
-
-  const topConversations = useMemo(
-    () => edges.slice(0, 8),
-    [edges],
+  const selectedPacket = useMemo(
+    () => filteredPackets.find((packet) => packet.id === selectedPacketId) || null,
+    [filteredPackets, selectedPacketId],
   )
 
-  const replayAnalysis = useMemo(() => {
+  const trafficAnalysis = useMemo(() => {
     const conversations = new Map()
     const endpoints = new Map()
     const protocols = new Map()
@@ -792,7 +776,7 @@ export default function App() {
     const timelineBuckets = Array.from({ length: 40 }, () => 0)
     const duration = Math.max(replayMeta?.duration || 0, 0.1)
 
-    replayPackets.forEach((packet) => {
+    filteredPackets.forEach((packet) => {
       const size = Number(packet.size) || 0
       const proto = packet.proto || 'OTHER'
       const src = packet.src || packet.srcIp
@@ -823,15 +807,15 @@ export default function App() {
       conversation.last = Math.max(conversation.last, packet.replayTime)
       conversations.set(convoKey, conversation)
 
-      ;[src, dst].forEach((ip) => {
-        const endpoint = endpoints.get(ip) || { ip, bytes: 0, packets: 0, protocols: new Set(), mac: '' }
-        endpoint.bytes += size
-        endpoint.packets += 1
-        endpoint.protocols.add(proto)
-        if (ip === packet.srcIp && packet.srcMac) endpoint.mac = packet.srcMac
-        if (ip === packet.dstIp && packet.dstMac) endpoint.mac = packet.dstMac
-        endpoints.set(ip, endpoint)
-      })
+        ;[src, dst].forEach((ip) => {
+          const endpoint = endpoints.get(ip) || { ip, bytes: 0, packets: 0, protocols: new Set(), mac: '' }
+          endpoint.bytes += size
+          endpoint.packets += 1
+          endpoint.protocols.add(proto)
+          if (ip === packet.srcIp && packet.srcMac) endpoint.mac = packet.srcMac
+          if (ip === packet.dstIp && packet.dstMac) endpoint.mac = packet.dstMac
+          endpoints.set(ip, endpoint)
+        })
 
       const protocol = protocols.get(proto) || { proto, bytes: 0, packets: 0 }
       protocol.bytes += size
@@ -865,15 +849,34 @@ export default function App() {
       timelineBuckets,
       maxBucket: Math.max(...timelineBuckets, 1),
     }
-  }, [conversationSort, replayMeta, replayPackets])
+  }, [conversationSort, filteredPackets, replayMeta])
+
+  const replayAnalysis = trafficAnalysis
+  const replayGraphBucket = activeSource === 'replay' ? Math.floor(replayTime * 8) : 0
 
   useEffect(() => {
     selectedIpRef.current = selectedIp
+    if (!selectedIp) pointerLockedIpRef.current = null
+    pointTargetRef.current = selectedIp
+      ? { active: true, ip: selectedIp, x: 0, y: 0 }
+      : { active: false, ip: null, x: 0, y: 0 }
   }, [selectedIp])
 
   useEffect(() => {
     appModeRef.current = appMode
   }, [appMode])
+
+  useEffect(() => {
+    activeSourceRef.current = activeSource
+  }, [activeSource])
+
+  useEffect(() => {
+    activeFilterRef.current = activeFilter
+  }, [activeFilter])
+
+  useEffect(() => {
+    filteredPacketsRef.current = filteredPackets
+  }, [filteredPackets])
 
   useEffect(() => {
     showLabelsRef.current = showLabels
@@ -891,6 +894,7 @@ export default function App() {
 
   useEffect(() => {
     if (!cameraRef.current) return
+    cameraZoomRef.current = cameraZoom
     cameraRef.current.zoom = cameraZoom
     cameraRef.current.updateProjectionMatrix()
   }, [cameraZoom])
@@ -903,22 +907,22 @@ export default function App() {
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x050505)
 
-    const viewSize = 760
-    const aspect = mount.clientWidth / mount.clientHeight
-    const camera = new THREE.OrthographicCamera(
-      (-viewSize * aspect) / 2,
-      (viewSize * aspect) / 2,
-      viewSize / 2,
-      -viewSize / 2,
-      0.1,
-      2200,
-    )
-    camera.position.set(0, 900, 0)
+    const camera = new THREE.PerspectiveCamera(55, mount.clientWidth / mount.clientHeight, 1, 4000)
+    camera.position.set(0, 620, 520)
     camera.lookAt(0, 0, 0)
-    camera.up.set(0, 0, -1)
-    camera.zoom = DEFAULT_CAMERA_ZOOM
-    camera.updateProjectionMatrix()
     cameraRef.current = camera
+
+    function applyOrbit() {
+      const target = orbitStateRef.current.target
+      const x = orbitStateRef.current.radius * Math.sin(orbitStateRef.current.phi) * Math.sin(orbitStateRef.current.theta)
+      const y = orbitStateRef.current.radius * Math.cos(orbitStateRef.current.phi)
+      const z = orbitStateRef.current.radius * Math.sin(orbitStateRef.current.phi) * Math.cos(orbitStateRef.current.theta)
+      camera.position.set(target.x + x, target.y + y, target.z + z)
+      camera.lookAt(target)
+    }
+    applyOrbitRef.current = applyOrbit
+    orbitStateRef.current.target = ORBIT_TARGET.clone()
+    applyOrbit()
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     renderer.setSize(mount.clientWidth, mount.clientHeight)
@@ -935,40 +939,54 @@ export default function App() {
     rimLight.position.set(-180, -80, -120)
     scene.add(rimLight)
 
-    const nodeGeometry = new THREE.SphereGeometry(8, 32, 24)
-    const edgeGeometry = new THREE.CylinderGeometry(1, 1, 1, 10)
-    const packetGeometry = new THREE.SphereGeometry(2.5, 12, 12)
+    const nodeGeometry = new THREE.SphereGeometry(8, 20, 14)
+    const packetGeometry = new THREE.SphereGeometry(1.4, 10, 10)
     const raycaster = new THREE.Raycaster()
     const pointer = new THREE.Vector2()
-    const ringGuides = NETWORK_RING_RADII.slice(1).map((radius, index) => {
-      const guide = makeRingGuide(radius, (index + 1) * -8)
-      scene.add(guide)
-      return guide
-    })
-    const ringLabels = NETWORK_RING_RADII.map((radius, index) => {
-      const label = makeTextSprite(`HOP ${index}`)
-      label.position.set(0, index * -8 + 20, radius === 0 ? -44 : -radius)
-      label.scale.set(44, 11, 1)
-      scene.add(label)
-      return label
-    })
 
-    function setRingOverlay(hasFocus, ringRadii = NETWORK_RING_RADII) {
-      const labelsEnabled = showLabelsRef.current
+    function updateOrbitTarget() {
+      let count = 0
+      const center = new THREE.Vector3()
+      const orbit = orbitStateRef.current
 
-      ringGuides.forEach((guide, index) => {
-        const ringIndex = index + 1
-        const visible = hasFocus ? ringIndex === 1 : true
-        guide.visible = visible
-        if (visible) updateRingGuide(guide, ringRadii[ringIndex], ringIndex * -8)
+      orbit.panX = THREE.MathUtils.clamp(orbit.panX || 0, -PAN_BOUND, PAN_BOUND)
+      orbit.panY = THREE.MathUtils.clamp(orbit.panY || 0, -PAN_BOUND, PAN_BOUND)
+      orbit.panZ = THREE.MathUtils.clamp(orbit.panZ || 0, -PAN_BOUND, PAN_BOUND)
+
+      if (orbit.recenterPan) {
+        orbit.panX = THREE.MathUtils.lerp(orbit.panX, 0, 0.055)
+        orbit.panY = THREE.MathUtils.lerp(orbit.panY, 0, 0.055)
+        orbit.panZ = THREE.MathUtils.lerp(orbit.panZ, 0, 0.055)
+        if (Math.abs(orbit.panX) + Math.abs(orbit.panY) + Math.abs(orbit.panZ) < 0.6) {
+          orbit.panX = 0
+          orbit.panY = 0
+          orbit.panZ = 0
+          orbit.recenterPan = false
+        }
+      }
+
+      nodeStore.forEach((node) => {
+        if (!node.group.visible) return
+        center.x += node.x
+        center.y += node.y
+        center.z += node.z
+        count += 1
       })
 
-      ringLabels.forEach((label, ringIndex) => {
-        const visible = hasFocus ? ringIndex <= 1 : true
-        const radius = ringRadii[ringIndex] || 0
-        label.visible = visible && labelsEnabled
-        label.position.set(0, ringIndex * -8 + 20, radius === 0 ? -44 : -radius)
-      })
+      if (!count) {
+        orbit.target.lerp(new THREE.Vector3(
+          ORBIT_TARGET.x + (orbit.panX || 0),
+          ORBIT_TARGET.y + (orbit.panY || 0),
+          ORBIT_TARGET.z + (orbit.panZ || 0),
+        ), 0.04)
+        return
+      }
+
+      center.multiplyScalar(1 / count)
+      center.x += orbit.panX || 0
+      center.y += orbit.panY || 0
+      center.z += orbit.panZ || 0
+      orbit.target.lerp(center, 0.06)
     }
 
     function snapshotState() {
@@ -1002,6 +1020,12 @@ export default function App() {
       setEdges(nextEdges)
     }
 
+    function rebuildGraph(packets) {
+      clearGraph()
+      packets.forEach((packet) => ingestPacket(packet))
+      snapshotState()
+    }
+
     function labelForNode(node) {
       const mode = labelModeRef.current
       if (mode === 'off') return ''
@@ -1026,6 +1050,7 @@ export default function App() {
 
       edgeStore.forEach((edge) => {
         scene.remove(edge.mesh)
+        edge.mesh.geometry.dispose()
         edge.mesh.material.dispose()
       })
       edgeStore.clear()
@@ -1038,6 +1063,14 @@ export default function App() {
       })
       nodeStore.clear()
       setSelectedIp(null)
+      pointTargetRef.current = { active: false, ip: null, x: 0, y: 0 }
+      setPointReticle((current) => ({ ...current, active: false, locked: false }))
+      orbitStateRef.current.panX = 0
+      orbitStateRef.current.panY = 0
+      orbitStateRef.current.panZ = 0
+      orbitStateRef.current.recenterPan = false
+      layoutSpreadRef.current.value = 1
+      layoutSpreadRef.current.target = 1
       setNodes([])
       setEdges([])
     }
@@ -1087,13 +1120,12 @@ export default function App() {
         packets: 0,
         recentBytes: 0,
         renderScale: 1,
-        ring: null,
+        clusterAnchor: clusterAnchor(ip),
         mac: '',
         labelText: ip,
       }
 
       nodeStore.set(ip, node)
-      snapshotState()
       return node
     }
 
@@ -1101,17 +1133,20 @@ export default function App() {
       const key = edgeKey(src, dst)
       if (edgeStore.has(key)) return edgeStore.get(key)
 
-      const material = new THREE.MeshBasicMaterial({
-        color: 0xb7b7bd,
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3))
+
+      const material = new THREE.LineBasicMaterial({
+        color: 0xf2f2f5,
         transparent: true,
-        opacity: 0.46,
+        opacity: 0.58,
+        depthTest: true,
       })
-      const mesh = new THREE.Mesh(edgeGeometry, material)
+      const mesh = new THREE.Line(geometry, material)
       scene.add(mesh)
 
-      const edge = { key, src, dst, mesh, bytes: 0, packets: 0, recentBytes: 0 }
+      const edge = { key, src, dst, mesh, bytes: 0, packets: 0, recentBytes: 0, recentPackets: 0 }
       edgeStore.set(key, edge)
-      snapshotState()
       return edge
     }
 
@@ -1135,189 +1170,51 @@ export default function App() {
       const adjacency = buildAdjacency()
       depths.set(selected, 0)
 
-      ;[...(adjacency.get(selected) || [])].forEach((ip) => {
-        depths.set(ip, 1)
-      })
+        ;[...(adjacency.get(selected) || [])].forEach((ip) => {
+          depths.set(ip, 1)
+        })
 
       return depths
-    }
-
-    function assignRadialFocusTargets(selected, depths) {
-      const depthOne = []
-
-      depths.forEach((depth, ip) => {
-        if (depth === 1) depthOne.push(ip)
-      })
-
-      depthOne.sort()
-
-      const selectedNode = nodeStore.get(selected)
-      const depthOneNodes = depthOne.map((ip) => nodeStore.get(ip)).filter(Boolean)
-      const centerClearance = selectedNode
-        ? nodeRadius(selectedNode) + Math.max(...depthOneNodes.map((node) => nodeRadius(node)), 0) + NODE_RING_GAP
-        : FOCUS_RING_RADIUS
-      const focusRadius = Math.min(
-        Math.max(FOCUS_RING_RADIUS, requiredRingRadius(depthOneNodes), centerClearance),
-        FOCUS_RING_MAX_RADIUS,
-      )
-      const focusScale = ringCapacityScale(depthOneNodes, focusRadius)
-      if (selectedNode) {
-        selectedNode.tx = 0
-        selectedNode.ty = 0
-        selectedNode.tz = 0
-        selectedNode.renderScale = focusScale
-        selectedNode.ring = 0
-      }
-
-      setRingOverlay(true, [0, focusRadius, 0, 0])
-
-      depthOne.forEach((ip, index) => {
-        const node = nodeStore.get(ip)
-        const target = flatRingPosition(index, depthOne.length, focusRadius, -8)
-        node.tx = target.x
-        node.ty = target.y
-        node.tz = target.z
-        node.renderScale = focusScale
-        node.ring = 1
-      })
-    }
-
-    function assignNetworkRingTargets(nodeList, edgeList, adjacency) {
-      const visibleNodes = nodeList.filter((node) => (adjacency.get(node.ip)?.size || 0) > 0)
-      const realLanNodes = visibleNodes.filter((node) => isLanUnicast(node.ip))
-      const gateway =
-        realLanNodes
-          .filter((node) => isGatewayCandidate(node.ip))
-          .sort((a, b) => b.bytes - a.bytes || b.packets - a.packets)[0] ||
-        realLanNodes.sort((a, b) => b.bytes - a.bytes || b.packets - a.packets)[0] ||
-        visibleNodes.sort((a, b) => b.bytes - a.bytes || b.packets - a.packets)[0]
-
-      const gatewayIp = gateway?.ip
-      const gatewayNeighbors = gatewayIp ? adjacency.get(gatewayIp) || new Set() : new Set()
-      const realPeerTraffic = realLanNodes
-        .filter((node) => node.ip !== gatewayIp)
-        .map((node) => node.bytes + node.recentBytes * 4 + node.packets * 64)
-        .sort((a, b) => a - b)
-      const activityCutoff = realPeerTraffic.length
-        ? realPeerTraffic[Math.floor(realPeerTraffic.length * 0.55)]
-        : 0
-      const linkedToGatewayBytes = new Map()
-
-      edgeList.forEach((edge) => {
-        if (edge.src === gatewayIp) linkedToGatewayBytes.set(edge.dst, edge.bytes)
-        if (edge.dst === gatewayIp) linkedToGatewayBytes.set(edge.src, edge.bytes)
-      })
-
-      const rings = [[], [], [], []]
-
-      visibleNodes.forEach((node) => {
-        if (node.ip === gatewayIp) {
-          rings[0].push(node)
-          return
-        }
-
-        if (isSpecialIpv4(node.ip)) {
-          rings[3].push(node)
-          return
-        }
-
-        const trafficScore = node.bytes + node.recentBytes * 4 + node.packets * 64
-        const gatewayEdgeBytes = linkedToGatewayBytes.get(node.ip) || 0
-        const isDirectActivePeer =
-          isLanUnicast(node.ip) &&
-          gatewayNeighbors.has(node.ip) &&
-          (trafficScore >= activityCutoff || gatewayEdgeBytes >= 2048 || node.packets >= 4)
-
-        if (isDirectActivePeer) {
-          rings[1].push(node)
-          return
-        }
-
-        rings[2].push(node)
-      })
-
-      rings.forEach((ring) => {
-        ring.sort((a, b) => b.bytes - a.bytes || a.ip.localeCompare(b.ip))
-      })
-
-      const ringRadii = [0]
-      for (let ringIndex = 1; ringIndex < rings.length; ringIndex += 1) {
-        const previousRadius = ringRadii[ringIndex - 1]
-        const roomyRadius = Math.max(NETWORK_RING_RADII[ringIndex], requiredRingRadius(rings[ringIndex]))
-        const separatedRadius = Math.max(roomyRadius, previousRadius + NETWORK_RING_SEPARATION)
-        const maxRadius = Math.max(NETWORK_RING_MAX_RADII[ringIndex], previousRadius + NETWORK_RING_SEPARATION)
-        ringRadii[ringIndex] = Math.min(separatedRadius, maxRadius)
-      }
-      const ringScales = rings.map((ring, ringIndex) =>
-        ringCapacityScale(ring, ringRadii[ringIndex]),
-      )
-
-      rings.forEach((ring, ringIndex) => {
-        const radius = ringRadii[ringIndex]
-
-        ring.forEach((node, index) => {
-          const target = flatRingPosition(index, ring.length, radius, ringIndex * -8)
-          node.tx = target.x
-          node.ty = target.y
-          node.tz = target.z
-          node.ring = ringIndex
-          node.renderScale = ringScales[ringIndex]
-        })
-      })
-
-      setRingOverlay(false, ringRadii)
-
-      return { gatewayIp, rings, ringRadii }
     }
 
     function applyGraphForces() {
       const nodeList = [...nodeStore.values()]
       const edgeList = [...edgeStore.values()]
-      const selected = selectedIpRef.current
-      const depths = focusDepths(selected)
-      const hasFocus = depths.size > 0
       const adjacency = buildAdjacency()
-
-      if (hasFocus) assignRadialFocusTargets(selected, depths)
-      if (!hasFocus) assignNetworkRingTargets(nodeList, edgeList, adjacency)
+      const spread = layoutSpreadRef.current.value
+      const spreadForce = Math.pow(spread, 1.18)
+      const pointTarget = pointTargetRef.current
+      const depths = pointTarget.active && pointTarget.ip ? focusDepths(pointTarget.ip) : new Map()
+      const hasFocus = depths.size > 0
+      const visibleNodes = nodeList.filter((node) => (adjacency.get(node.ip)?.size || 0) > 0)
 
       nodeList.forEach((node) => {
-        const isConnected = (adjacency.get(node.ip)?.size || 0) > 0
-        const depth = hasFocus ? depths.get(node.ip) : undefined
-        node.group.visible = hasFocus ? depth !== undefined : isConnected
+        const degree = adjacency.get(node.ip)?.size || 0
+        node.group.visible = degree > 0
+        node.renderScale = 1
+        if (!node.group.visible) return
 
-        const hiddenPull = hasFocus && depth === undefined ? 0.018 : hasFocus ? 0.045 : 0.07
-        const dx = node.tx - node.x
-        const dy = node.ty - node.y
-        const dz = node.tz - node.z
-        node.vx += dx * hiddenPull
-        node.vy += dy * hiddenPull
-        node.vz += dz * hiddenPull
+        const centerPull = 0.0028 / Math.max(spreadForce, 0.78)
+        const clusterPull = 0.0018
+        const anchor = node.clusterAnchor || { x: 0, y: 0, z: 0 }
 
-        if (hasFocus && depth === undefined) {
-          node.renderScale = MIN_NODE_SCALE
-          node.vx += (node.x > 0 ? 1 : -1) * 0.03
-          node.vy -= 0.015
-          node.vz += (node.z > 0 ? 1 : -1) * 0.03
-        }
+        node.vx += -node.x * centerPull + (anchor.x * spreadForce - node.x) * clusterPull
+        node.vy += -node.y * centerPull + (anchor.y * spreadForce - node.y) * clusterPull
+        node.vz += -node.z * centerPull + (anchor.z * spreadForce - node.z) * clusterPull
       })
 
-      for (let i = 0; i < nodeList.length; i += 1) {
-        for (let j = i + 1; j < nodeList.length; j += 1) {
-          const a = nodeList[i]
-          const b = nodeList[j]
-          const depthA = hasFocus ? depths.get(a.ip) : 0
-          const depthB = hasFocus ? depths.get(b.ip) : 0
-          if (hasFocus && depthA === undefined && depthB === undefined) continue
+      for (let i = 0; i < visibleNodes.length; i += 1) {
+        for (let j = i + 1; j < visibleNodes.length; j += 1) {
+          const a = visibleNodes[i]
+          const b = visibleNodes[j]
 
           const dx = b.x - a.x
           const dy = b.y - a.y
           const dz = b.z - a.z
           const distanceSq = Math.max(dx * dx + dy * dy + dz * dz, 0.01)
           const distance = Math.sqrt(distanceSq)
-          const sameNetworkRing = !hasFocus && a.ring === b.ring
-          const spacing = collisionNodeRadius(a) + collisionNodeRadius(b) + (hasFocus ? 26 : sameNetworkRing ? 34 : 18)
-          const repel = Math.min((spacing * spacing) / distanceSq, 2.2) * (hasFocus ? 0.05 : 0.035)
+          const spacing = collisionNodeRadius(a) + collisionNodeRadius(b) + 34 + 58 * spreadForce
+          const repel = Math.min((spacing * spacing) / distanceSq, 4.4) * 0.072 * spreadForce
           const nx = dx / distance
           const ny = dy / distance
           const nz = dz / distance
@@ -1335,16 +1232,15 @@ export default function App() {
         const a = nodeStore.get(edge.src)
         const b = nodeStore.get(edge.dst)
         if (!a || !b) return
-        edge.mesh.visible = !hasFocus || (depths.has(edge.src) && depths.has(edge.dst))
-
-        if (!hasFocus) return
+        edge.mesh.visible = a.group.visible && b.group.visible
+        if (!edge.mesh.visible) return
 
         const dx = b.x - a.x
         const dy = b.y - a.y
         const dz = b.z - a.z
         const distance = Math.max(Math.sqrt(dx * dx + dy * dy + dz * dz), 0.01)
-        const strength = THREE.MathUtils.clamp(Math.log10(edge.bytes + 1) * 0.0035 + 0.006, 0.006, 0.026)
-        const desired = 105
+        const desired = THREE.MathUtils.clamp(72 + Math.log10(edge.bytes + 1) * 11, 72, 155) * spreadForce
+        const strength = THREE.MathUtils.clamp(0.004 + Math.log10(edge.packets + 1) * 0.0022, 0.004, 0.018)
         const force = (distance - desired) * strength
         const nx = dx / distance
         const ny = dy / distance
@@ -1358,23 +1254,12 @@ export default function App() {
         b.vz -= nz * force
       })
 
-      nodeList.forEach((node) => {
-        node.vx *= 0.82
-        node.vy *= 0.82
-        node.vz *= 0.82
-        node.x += THREE.MathUtils.clamp(node.vx, -4.6, 4.6)
-        node.y += THREE.MathUtils.clamp(node.vy, -4.6, 4.6)
-        node.z += THREE.MathUtils.clamp(node.vz, -4.6, 4.6)
-      })
+      for (let i = 0; i < visibleNodes.length; i += 1) {
+        for (let j = i + 1; j < visibleNodes.length; j += 1) {
+          const a = visibleNodes[i]
+          const b = visibleNodes[j]
 
-      for (let i = 0; i < nodeList.length; i += 1) {
-        for (let j = i + 1; j < nodeList.length; j += 1) {
-          const a = nodeList[i]
-          const b = nodeList[j]
-          if (!a.group.visible || !b.group.visible) continue
-
-          const sameNetworkRing = !hasFocus && a.ring === b.ring
-          const minDistance = collisionNodeRadius(a) + collisionNodeRadius(b) + (sameNetworkRing ? 10 : 6)
+          const minDistance = collisionNodeRadius(a) + collisionNodeRadius(b) + 18 + 28 * spreadForce
           const dx = b.x - a.x
           const dy = b.y - a.y
           const dz = b.z - a.z
@@ -1386,26 +1271,23 @@ export default function App() {
           const ny = dy / distance
           const nz = dz / distance
 
-          if (a.ring !== 0 || hasFocus) {
-            a.x -= nx * push
-            a.y -= ny * push
-            a.z -= nz * push
-          }
-          if (b.ring !== 0 || hasFocus) {
-            b.x += nx * push
-            b.y += ny * push
-            b.z += nz * push
-          }
+          a.x -= nx * push
+          a.y -= ny * push
+          a.z -= nz * push
+          b.x += nx * push
+          b.y += ny * push
+          b.z += nz * push
         }
       }
 
-      nodeList.forEach((node) => {
+      visibleNodes.forEach((node) => {
         if (!node.group.visible) return
-        node.x = node.tx
-        node.y = THREE.MathUtils.lerp(node.y, node.ty, 0.35)
-        node.z = node.tz
-        node.vx = 0
-        node.vz = 0
+        node.vx *= 0.84
+        node.vy *= 0.84
+        node.vz *= 0.84
+        node.x += THREE.MathUtils.clamp(node.vx, -5.8, 5.8)
+        node.y += THREE.MathUtils.clamp(node.vy, -5.8, 5.8)
+        node.z += THREE.MathUtils.clamp(node.vz, -5.8, 5.8)
       })
 
       return { hasFocus, depths }
@@ -1421,7 +1303,7 @@ export default function App() {
         opacity: 0.96,
       })
       const mesh = new THREE.Mesh(packetGeometry, material)
-      const scale = THREE.MathUtils.clamp(0.8 + size / 900, 0.8, 2.4)
+      const scale = THREE.MathUtils.clamp(0.75 + size / 1800, 0.75, 1.9)
       mesh.scale.setScalar(scale)
       scene.add(mesh)
 
@@ -1456,6 +1338,7 @@ export default function App() {
       edge.bytes += size
       edge.packets += 1
       edge.recentBytes += size
+      edge.recentPackets += 1
 
       spawnPacket(src, dst, proto, size)
     }
@@ -1479,8 +1362,14 @@ export default function App() {
         const labelsEnabled = showLabelsRef.current
         const depth = hasFocus ? depths.get(node.ip) : 0
         const visibleWeight = hasFocus
-          ? { 0: 1, 1: 0.94 }[depth] || 0
+          ? { 0: 1, 1: 0.96 }[depth] || 0.14
           : 1
+        const zoomOutVisibility = THREE.MathUtils.clamp(
+          (DEFAULT_CAMERA_ZOOM - cameraZoomRef.current) / (DEFAULT_CAMERA_ZOOM - MIN_CAMERA_ZOOM),
+          0,
+          1,
+        )
+        const labelOpacityFloor = 0.82 + zoomOutVisibility * 0.16
         const scale = (nodeRadius(node) / 8) * nodeRenderScale(node)
         const labelScale = THREE.MathUtils.clamp(nodeRenderScale(node), 0.55, 1)
         const pulse = THREE.MathUtils.clamp(node.recentBytes / 4500, 0, 1.8)
@@ -1491,11 +1380,11 @@ export default function App() {
         node.label.visible = labelsEnabled
         node.label.material.opacity = THREE.MathUtils.lerp(
           node.label.material.opacity,
-          !labelsEnabled || (hasFocus && depth === undefined) ? 0 : Math.max(visibleWeight, 0.88),
+          !labelsEnabled ? 0 : hasFocus && depth === undefined ? 0.12 : Math.max(visibleWeight, labelOpacityFloor),
           0.14,
         )
         node.label.position.y = 22 + scale * 7
-        node.label.scale.lerp(new THREE.Vector3(112 * labelScale, 28 * labelScale, 1), 0.18)
+        node.label.scale.lerp(new THREE.Vector3(150 * labelScale, 38 * labelScale, 1), 0.18)
         node.recentBytes *= 0.91
       })
 
@@ -1504,24 +1393,35 @@ export default function App() {
         const b = nodeStore.get(edge.dst)
         if (!a || !b) return
 
-        const start = new THREE.Vector3(a.x, a.y, a.z)
-        const end = new THREE.Vector3(b.x, b.y, b.z)
-        const radius = THREE.MathUtils.clamp(0.36 + Math.log10(edge.bytes + 1) * 0.13, 0.36, 2.35)
         const srcDepth = hasFocus ? depths.get(edge.src) : 0
         const dstDepth = hasFocus ? depths.get(edge.dst) : 0
-        const focusedEdge = !hasFocus || (srcDepth !== undefined && dstDepth !== undefined)
-        const baseOpacity = focusedEdge ? 0.28 : 0
-        const maxOpacity = focusedEdge ? 0.78 : 0
-        edge.mesh.material.opacity = THREE.MathUtils.clamp(baseOpacity + edge.recentBytes / 5500, baseOpacity, maxOpacity)
-        setCylinderBetween(edge.mesh, start, end, radius)
+        const targetIp = pointTargetRef.current.ip
+        const focusedEdge = !hasFocus || (
+          srcDepth !== undefined &&
+          dstDepth !== undefined &&
+          (edge.src === targetIp || edge.dst === targetIp)
+        )
+        const packetChattyness = THREE.MathUtils.clamp(Math.log1p(edge.recentPackets) / Math.log1p(9), 0, 1)
+        const byteChattyness = THREE.MathUtils.clamp(Math.log1p(edge.recentBytes) / Math.log1p(9000), 0, 1)
+        const chattyness = THREE.MathUtils.clamp(packetChattyness * 0.68 + byteChattyness * 0.32, 0, 1)
+        const baseOpacity = focusedEdge ? (chattyness > 0 ? 0.28 : 0.18) : 0.06
+        const activeOpacity = focusedEdge ? 0.96 : 0.24
+        const targetOpacity = baseOpacity + chattyness * (activeOpacity - baseOpacity)
+        const positions = edge.mesh.geometry.attributes.position
+        positions.setXYZ(0, a.x, a.y, a.z)
+        positions.setXYZ(1, b.x, b.y, b.z)
+        positions.needsUpdate = true
+        edge.mesh.geometry.computeBoundingSphere()
+        edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, targetOpacity, 0.12)
         edge.recentBytes *= 0.88
+        edge.recentPackets *= 0.86
       })
     }
 
     function updatePackets() {
       const remove = []
-      const selected = selectedIpRef.current
-      const depths = selected ? focusDepths(selected) : null
+      const pointTarget = pointTargetRef.current
+      const depths = pointTarget.active && pointTarget.ip ? focusDepths(pointTarget.ip) : null
 
       packetStore.forEach((packet, index) => {
         const src = nodeStore.get(packet.src)
@@ -1560,17 +1460,24 @@ export default function App() {
     ingestPacketRef.current = ingestPacket
     resetGraphRef.current = clearGraph
     snapshotGraphRef.current = snapshotState
+    rebuildGraphRef.current = rebuildGraph
+
+    function updateLayoutSpread() {
+      const spread = layoutSpreadRef.current
+      spread.target = THREE.MathUtils.clamp(spread.target, MIN_LAYOUT_SPREAD, MAX_LAYOUT_SPREAD)
+      spread.value = THREE.MathUtils.lerp(spread.value, spread.target, 0.075)
+    }
 
     function animate() {
       frameRef.current = requestAnimationFrame(animate)
+      updateLayoutSpread()
       updateGraphVisuals()
       updatePackets()
+      updateOrbitTarget()
+      applyOrbit()
 
       nodeStore.forEach((node) => {
         node.label.quaternion.copy(camera.quaternion)
-      })
-      ringLabels.forEach((label) => {
-        label.quaternion.copy(camera.quaternion)
       })
 
       if (Math.random() < 0.03) snapshotState()
@@ -1578,36 +1485,58 @@ export default function App() {
     }
 
     function handlePointerDown(event) {
+      // node selection (existing raycaster logic)
       const bounds = renderer.domElement.getBoundingClientRect()
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
       raycaster.setFromCamera(pointer, camera)
-      const meshes = [...nodeStore.values()].filter((node) => node.group.visible).map((node) => node.mesh)
+      const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.mesh)
       const hit = raycaster.intersectObjects(meshes, false)[0]
       if (hit?.object?.userData?.ip) {
+        pointerLockedIpRef.current = hit.object.userData.ip
+        pointTargetRef.current = { active: true, ip: hit.object.userData.ip, x: 0, y: 0 }
         setSelectedIp(hit.object.userData.ip)
-      } else if (selectedIpRef.current) {
-        setSelectedIp(null)
+      } else {
+        // start orbit drag only if not hitting a node
+        pointerLockedIpRef.current = null
+        pointTargetRef.current = { active: false, ip: null, x: 0, y: 0 }
+        if (selectedIpRef.current) setSelectedIp(null)
+        orbitStateRef.current.isPointerDown = true
+        orbitStateRef.current.lastX = event.clientX
+        orbitStateRef.current.lastY = event.clientY
       }
     }
 
+    function handlePointerMove(event) {
+      const orbit = orbitStateRef.current
+      if (!orbit.isPointerDown) return
+      const dx = event.clientX - orbit.lastX
+      const dy = event.clientY - orbit.lastY
+      orbit.theta -= dx * 0.006
+      orbit.phi = THREE.MathUtils.clamp(orbit.phi + dy * 0.006, 0.08, Math.PI - 0.08)
+      orbit.lastX = event.clientX
+      orbit.lastY = event.clientY
+      applyOrbit()
+    }
+
+    function handlePointerUp() {
+      orbitStateRef.current.isPointerDown = false
+    }
     function handleWheel(event) {
       event.preventDefault()
-      const direction = event.deltaY > 0 ? -0.12 : 0.12
-      setCameraZoom((zoom) => clampZoom(zoom + direction))
+      orbitStateRef.current.radius = THREE.MathUtils.clamp(orbitStateRef.current.radius + event.deltaY * 0.8, 200, 2200)
+      applyOrbit()
     }
 
     function handleResize() {
-      const nextAspect = mount.clientWidth / mount.clientHeight
-      camera.left = (-viewSize * nextAspect) / 2
-      camera.right = (viewSize * nextAspect) / 2
-      camera.top = viewSize / 2
-      camera.bottom = -viewSize / 2
+      camera.aspect = mount.clientWidth / mount.clientHeight
       camera.updateProjectionMatrix()
       renderer.setSize(mount.clientWidth, mount.clientHeight)
     }
-
     renderer.domElement.addEventListener('pointerdown', handlePointerDown)
+    renderer.domElement.addEventListener('pointermove', handlePointerMove)
+    renderer.domElement.addEventListener('pointerup', handlePointerUp)
+    renderer.domElement.addEventListener('pointerleave', handlePointerUp)
     renderer.domElement.addEventListener('wheel', handleWheel, { passive: false })
     window.addEventListener('resize', handleResize)
     animate()
@@ -1620,7 +1549,22 @@ export default function App() {
 
     ws.addEventListener('message', (event) => {
       const data = JSON.parse(event.data)
-      if (data.type === 'packet' && appModeRef.current === 'live') ingestPacket(data)
+      if (data.type === 'packet') {
+        const packet = normalizePacket(data, 'live', Date.now())
+        livePacketsRef.current.push(packet)
+        if (livePacketsRef.current.length > LIVE_PACKET_HISTORY_LIMIT) {
+          livePacketsRef.current.splice(0, livePacketsRef.current.length - LIVE_PACKET_HISTORY_LIMIT)
+        }
+        if (livePacketFlushRef.current === null) {
+          livePacketFlushRef.current = window.setTimeout(() => {
+            livePacketFlushRef.current = null
+            setLivePackets([...livePacketsRef.current])
+          }, LIVE_PACKET_UI_FLUSH_MS)
+        }
+        if (appModeRef.current === 'live' && activeSourceRef.current === 'live' && packetMatchesFilter(packet, activeFilterRef.current)) {
+          ingestPacket(packet)
+        }
+      }
       if (data.type === 'nodes' && appModeRef.current === 'live') applyNodeSummary(data.nodes || [])
       if (data.type === 'capture_status') {
         if (data.iface && data.iface !== 'default interface') setCaptureInterface(data.iface)
@@ -1642,9 +1586,13 @@ export default function App() {
 
     return () => {
       window.clearInterval(summaryTimer)
+      if (livePacketFlushRef.current !== null) window.clearTimeout(livePacketFlushRef.current)
       ws.close()
       cancelAnimationFrame(frameRef.current)
       window.removeEventListener('resize', handleResize)
+      renderer.domElement.removeEventListener('pointermove', handlePointerMove)
+      renderer.domElement.removeEventListener('pointerup', handlePointerUp)
+      renderer.domElement.removeEventListener('pointerleave', handlePointerUp)
       renderer.domElement.removeEventListener('pointerdown', handlePointerDown)
       renderer.domElement.removeEventListener('wheel', handleWheel)
 
@@ -1656,6 +1604,7 @@ export default function App() {
       })
       edgeStore.forEach((edge) => {
         scene.remove(edge.mesh)
+        edge.mesh.geometry.dispose()
         edge.mesh.material.dispose()
       })
       packetStore.forEach((packet) => {
@@ -1663,21 +1612,11 @@ export default function App() {
         packet.mesh.material.dispose()
       })
       nodeGeometry.dispose()
-      edgeGeometry.dispose()
       packetGeometry.dispose()
-      ringGuides.forEach((guide) => {
-        scene.remove(guide)
-        guide.geometry.dispose()
-        guide.material.dispose()
-      })
-      ringLabels.forEach((label) => {
-        scene.remove(label)
-        label.material.map.dispose()
-        label.material.dispose()
-      })
       ingestPacketRef.current = null
       resetGraphRef.current = null
       snapshotGraphRef.current = null
+      rebuildGraphRef.current = null
       cameraRef.current = null
       renderer.dispose()
 
@@ -1687,9 +1626,167 @@ export default function App() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!gesturesEnabled) {
+      gestureCleanupRef.current?.()
+      gestureCleanupRef.current = null
+      return
+    }
+
+    const orbitRef = orbitStateRef
+    const orbitApply = applyOrbitRef
+    const cam = cameraRef
+    const nodes = nodesRef
+
+    import('./useHandGestures.js').then((module) => {
+      const init = module.useHandGestures({
+        orbitStateRef: orbitRef,
+        applyOrbitRef: orbitApply,
+        cameraRef: cam,
+        layoutSpreadRef,
+        onPointAt: ({
+          active,
+          mode = 'pointer',
+          x,
+          y,
+          lockKind = null,
+          lockProgress = 0,
+          locked = false,
+          selectionLockComplete = false,
+          openHand = false,
+        }) => {
+          if (!active) {
+            const lockedIp = pointerLockedIpRef.current
+            pointTargetRef.current = { active: Boolean(lockedIp), ip: lockedIp, x: 0, y: 0 }
+            setPointReticle((current) => ({
+              ...current,
+              active: false,
+              locked: false,
+              lockKind: null,
+              lockProgress: 0,
+            }))
+            return
+          }
+
+          if (!cam.current) return
+
+          const canvasBounds = mountRef.current?.getBoundingClientRect()
+          const viewportBounds = mountRef.current?.parentElement?.getBoundingClientRect()
+          if (!canvasBounds || !viewportBounds) return
+
+          const pointerPx = {
+            x: ((x + 1) / 2) * canvasBounds.width,
+            y: ((1 - y) / 2) * canvasBounds.height,
+          }
+          const reticleX = canvasBounds.left - viewportBounds.left + pointerPx.x
+          const reticleY = canvasBounds.top - viewportBounds.top + pointerPx.y
+
+          if (openHand) {
+            pointerLockedIpRef.current = null
+            pointTargetRef.current = { active: false, ip: null, x, y }
+            if (selectedIpRef.current) setSelectedIp(null)
+            setPointReticle({
+              active: true,
+              locked: false,
+              x: reticleX,
+              y: reticleY,
+              lockKind: null,
+              lockProgress: 0,
+              mode,
+            })
+            return
+          }
+
+          if (mode !== 'pointer') {
+            const lockedIp = pointerLockedIpRef.current
+            pointTargetRef.current = { active: Boolean(lockedIp), ip: lockedIp, x, y }
+            setPointReticle({
+              active: true,
+              locked: Boolean(lockedIp) || locked,
+              x: reticleX,
+              y: reticleY,
+              lockKind,
+              lockProgress,
+              mode,
+            })
+            return
+          }
+
+          let hitIp = null
+          let bestDistance = TARGET_PIXEL_TOLERANCE * 1.45
+
+          nodes.current.forEach((node) => {
+            if (!node.group.visible) return
+            const projected = new THREE.Vector3(node.x, node.y, node.z).project(cam.current)
+            if (projected.z < -1 || projected.z > 1) return
+            const nodePx = {
+              x: ((projected.x + 1) / 2) * canvasBounds.width,
+              y: ((1 - projected.y) / 2) * canvasBounds.height,
+            }
+            const distance = Math.hypot(nodePx.x - pointerPx.x, nodePx.y - pointerPx.y)
+            if (distance > bestDistance) return
+            bestDistance = distance
+            hitIp = node.ip
+          })
+
+          if (selectionLockComplete && hitIp && !pointerLockedIpRef.current) {
+            pointerLockedIpRef.current = hitIp
+            if (selectedIpRef.current !== hitIp) setSelectedIp(hitIp)
+          }
+
+          const lockedIp = pointerLockedIpRef.current
+          const focusIp = lockedIp || hitIp
+          pointTargetRef.current = { active: Boolean(focusIp), ip: focusIp, x, y }
+
+          if (hitIp) {
+            setPointReticle({
+              active: true,
+              locked: Boolean(lockedIp) || selectionLockComplete,
+              x: reticleX,
+              y: reticleY,
+              lockKind: lockedIp ? null : lockKind,
+              lockProgress: lockedIp ? 0 : lockProgress,
+              mode,
+            })
+          } else {
+            setPointReticle({
+              active: true,
+              locked: Boolean(lockedIp),
+              x: reticleX,
+              y: reticleY,
+              lockKind: null,
+              lockProgress: 0,
+              mode,
+            })
+          }
+        },
+      })
+      init?.().then(cleanup => {
+        gestureCleanupRef.current = cleanup
+      }).catch(err => console.error('Gesture init failed:', err))
+    })
+
+    return () => {
+      gestureCleanupRef.current?.()
+      gestureCleanupRef.current = null
+    }
+  }, [gesturesEnabled])
+
+  useEffect(() => {
+    if (!rebuildGraphRef.current) return
+    rebuildGraphRef.current(filteredPacketsRef.current)
+  }, [activeFilter, activeSource, replayGraphBucket])
+
+  useEffect(() => {
+    if (selectedPacketId && !filteredPackets.some((packet) => packet.id === selectedPacketId)) {
+      setSelectedPacketId(null)
+    }
+  }, [filteredPackets, selectedPacketId])
+
   function requestCapture() {
     setActiveTab('live')
     setAppMode('live')
+    setActiveSource('live')
     setReplayState('idle')
     resetGraphRef.current?.()
 
@@ -1702,22 +1799,33 @@ export default function App() {
     websocketRef.current.send(JSON.stringify({ type: 'start_capture' }))
   }
 
-  async function copyLiveCommand() {
+  function applyDisplayFilter(event) {
+    event.preventDefault()
     try {
-      await navigator.clipboard.writeText(liveCommand)
-      setCopiedCommand(true)
-      window.setTimeout(() => setCopiedCommand(false), 1400)
-    } catch {
-      setCopiedCommand(false)
+      const nextFilter = parseDisplayFilter(filterInput)
+      setActiveFilter(nextFilter)
+      setFilterError('')
+      setSelectedConversationKey(null)
+      setSelectedProtocol(nextFilter.type === 'protocol' ? nextFilter.value : null)
+    } catch (error) {
+      setFilterError(error instanceof Error ? error.message : 'Unsupported display filter.')
     }
+  }
+
+  function clearDisplayFilter() {
+    setFilterInput('')
+    setActiveFilter({ raw: '', type: 'all' })
+    setFilterError('')
+    setSelectedProtocol(null)
   }
 
   async function handleReplayFile(event) {
     const file = event.target.files?.[0]
     if (!file) return
 
-    setActiveTab('replay')
+    setActiveTab('live')
     setAppMode('replay')
+    setActiveSource('replay')
     setReplayError('')
     setReplayState('idle')
     setReplayIndex(0)
@@ -1726,7 +1834,7 @@ export default function App() {
 
     try {
       const parsed = parseCaptureBuffer(await file.arrayBuffer())
-      setReplayPackets(parsed.packets)
+      setReplayPackets(parsed.packets.map((packet, index) => normalizePacket(packet, 'replay', index)))
       setReplayMeta({
         name: file.name,
         format: parsed.format,
@@ -1767,10 +1875,8 @@ export default function App() {
     resetGraphRef.current?.()
     let nextIndex = 0
     while (nextIndex < replayPackets.length && replayPackets[nextIndex].replayTime <= nextTime) {
-      ingestPacketRef.current?.(replayPackets[nextIndex])
       nextIndex += 1
     }
-    snapshotGraphRef.current?.()
     setReplayIndex(nextIndex)
     setReplayTime(nextTime)
     setReplayState('paused')
@@ -1792,7 +1898,6 @@ export default function App() {
         setReplayIndex((currentIndex) => {
           let nextIndex = currentIndex
           while (nextIndex < replayPackets.length && replayPackets[nextIndex].replayTime <= nextTime) {
-            ingestPacketRef.current?.(replayPackets[nextIndex])
             nextIndex += 1
           }
           if (nextIndex >= replayPackets.length && nextTime >= duration) {
@@ -1809,229 +1914,140 @@ export default function App() {
   }, [appMode, replayMeta, replayPackets, replaySpeed, replayState])
 
   const needsCapturePermission = status === 'ready' || status === 'capture_error'
-  const activeTabContent = {
+  const currentThroughput = useMemo(() => {
+    if (!filteredPackets.length) return 0
+    const latest = Math.max(...filteredPackets.map((packet) => Number(packet.timestamp) || 0))
+    return filteredPackets
+      .filter((packet) => latest - (Number(packet.timestamp) || 0) <= 5)
+      .reduce((total, packet) => total + (Number(packet.size) || 0), 0) / 5
+  }, [filteredPackets])
+
+  const packetRows = filteredPackets.slice(-TABLE_ROW_LIMIT).reverse()
+  const protocolTotalBytes = Math.max(
+    trafficAnalysis.protocols.reduce((total, protocol) => total + protocol.bytes, 0),
+    1,
+  )
+
+  const packetDetails = selectedPacket
+    ? [
+      ['Frame', `${selectedPacket.id} · ${byteLabel(selectedPacket.size)}`],
+      ['Ethernet', `${selectedPacket.srcMac || 'unknown'} -> ${selectedPacket.dstMac || 'unknown'}`],
+      ['Network', `${selectedPacket.src || selectedPacket.srcIp} -> ${selectedPacket.dst || selectedPacket.dstIp}`],
+      ['Transport', packetInfo(selectedPacket)],
+    ]
+    : []
+
+  const packetBytesText = selectedPacket
+    ? [
+      `0000  ${String(selectedPacket.srcMac || 'unknown').padEnd(17)}  ${String(selectedPacket.dstMac || 'unknown').padEnd(17)}`,
+      `0010  ${String(selectedPacket.src || selectedPacket.srcIp).padEnd(20)} -> ${String(selectedPacket.dst || selectedPacket.dstIp)}`,
+      `0020  proto=${selectedPacket.proto || 'OTHER'} len=${selectedPacket.size || 0} sport=${selectedPacket.srcPort || '-'} dport=${selectedPacket.dstPort || '-'}`,
+    ].join('\n')
+    : 'Select a packet to inspect bytes.'
+
+  const reticleScale = THREE.MathUtils.clamp(1 / cameraZoom, 0.72, 1.35)
+  const showLiveWorkspaceControls = activeTab === 'live'
+
+  const analysisContent = {
     live: (
-      <section className="tabContent liveWorkspacePanel" aria-label="Live capture setup">
-        <div className="modeHeading">
-          <p>Live Capture</p>
-          <h2>{status === 'live' ? 'Live traffic is streaming.' : 'Inspect traffic as it happens.'}</h2>
+      <section className="analysisTab liveAnalysis">
+        <div className="analysisHeader">
+          <div>
+            <p>Capture Source</p>
+            <h2>{activeSource === 'live' ? 'Live Capture' : 'PCAP Replay'}</h2>
+          </div>
+          <div className="sourceSwitch" aria-label="Input source">
+            <button className={activeSource === 'live' ? 'active' : ''} type="button" onClick={() => { setActiveSource('live'); setAppMode('live'); setReplayState('idle') }}>Live</button>
+            <button className={activeSource === 'replay' ? 'active' : ''} type="button" onClick={() => { setActiveSource('replay'); setAppMode('replay') }}>PCAP Replay</button>
+          </div>
         </div>
-        {status === 'live' && (
-          <dl className="liveStatus">
-            <div>
-              <dt>Hosts</dt>
-              <dd>{networkStats.hosts.toLocaleString()}</dd>
+
+        {activeSource === 'live' ? (
+          <div className="sourcePanel">
+            <label className="fieldLabel" htmlFor="capture-interface">Interface</label>
+            <input id="capture-interface" value={captureInterface} onChange={(event) => setCaptureInterface(event.target.value)} placeholder="en0, eth0, wlan0" />
+            <div className="exampleChips" aria-label="Interface examples">
+              {['en0', 'eth0', 'wlan0'].map((iface) => (
+                <button type="button" key={iface} onClick={() => setCaptureInterface(iface)}>{iface}</button>
+              ))}
             </div>
-            <div>
-              <dt>Links</dt>
-              <dd>{networkStats.links.toLocaleString()}</dd>
-            </div>
-            <div>
-              <dt>Data</dt>
-              <dd>{byteLabel(networkStats.totalBytes)}</dd>
-            </div>
-          </dl>
-        )}
-        <ol className="steps">
-          <li>Choose the interface that should be captured.</li>
-          <li>Run the terminal command so the local helper can access packets.</li>
-          <li>Start capture here after the WebSocket server connects.</li>
-        </ol>
-        <label className="fieldLabel" htmlFor="capture-interface">
-          Interface
-        </label>
-        <input
-          id="capture-interface"
-          value={captureInterface}
-          onChange={(event) => setCaptureInterface(event.target.value)}
-          placeholder="en0, eth0, wlan0"
-        />
-        <div className="exampleChips" aria-label="Interface examples">
-          {['en0', 'eth0', 'wlan0'].map((iface) => (
-            <button type="button" key={iface} onClick={() => setCaptureInterface(iface)}>
-              {iface}
-            </button>
-          ))}
-        </div>
-        <div className="commandBlock">
-          <code>{liveCommand}</code>
-          <button type="button" onClick={copyLiveCommand}>
-            {copiedCommand ? 'Copied' : 'Copy'}
-          </button>
-        </div>
-        <p className="noteText">
-          Browsers cannot capture raw packets. PacMap uses the local Python helper launched by this
-          command. Use an Administrator terminal on Windows; macOS and Linux may need sudo or
-          another elevated shell.
-        </p>
-        {captureMessage && <p className="permissionError">{captureMessage}</p>}
-        <button className="primaryAction" type="button" onClick={requestCapture}>
-          {needsCapturePermission ? 'Start live capture' : 'Restart live view'}
-        </button>
-      </section>
-    ),
-    replay: (
-      <section className="tabContent replayWorkspacePanel" aria-label="PCAP replay setup">
-        <div className="modeHeading">
-          <p>Replay PCAP</p>
-          <h2>Inspect a saved capture over time.</h2>
-        </div>
-        <label className="uploadZone">
-          <input type="file" accept=".pcap,.pcapng" onChange={handleReplayFile} />
-          <strong>Upload .pcap or .pcapng</strong>
-          <span>Common IPv4 and IPv6 TCP, UDP, and DNS captures are replayed on the map.</span>
-        </label>
-        {replayError && <p className="permissionError">{replayError}</p>}
-        {replayMeta && (
-          <>
-            <dl className="replayStats">
-              <div>
-                <dt>File</dt>
-                <dd>{replayMeta.name}</dd>
-              </div>
-              <div>
-                <dt>Parsed</dt>
-                <dd>{replayMeta.parsed.toLocaleString()}</dd>
-              </div>
-              <div>
-                <dt>Skipped</dt>
-                <dd>{replayMeta.skipped.toLocaleString()}</dd>
-              </div>
-              <div>
-                <dt>Time</dt>
-                <dd>{replayTime.toFixed(1)}s</dd>
-              </div>
-              <div>
-                <dt>Detected</dt>
-                <dd>
-                  {replayMeta.linkTypes?.length
-                    ? replayMeta.linkTypes.map(linkTypeLabel).join(', ')
-                    : 'Unknown'}
-                </dd>
-              </div>
+            <dl className="liveStatus">
+              <div><dt>WebSocket</dt><dd>{status}</dd></div>
+              <div><dt>Packets</dt><dd>{livePackets.length.toLocaleString()}</dd></div>
+              <div><dt>Filtered</dt><dd>{filteredPackets.length.toLocaleString()}</dd></div>
             </dl>
-            <div className="playbackControls" aria-label="Replay controls">
-              <button
-                className="playButton"
-                type="button"
-                disabled={!replayPackets.length}
-                onClick={() => setReplayState(replayState === 'playing' ? 'paused' : 'playing')}
-              >
-                {replayState === 'playing' ? 'Pause' : 'Play'}
-              </button>
-              <button type="button" disabled={!replayPackets.length} onClick={() => restartReplay('paused')}>
-                Restart
-              </button>
-              <select
-                value={replaySpeed}
-                onChange={(event) => setReplaySpeed(Number(event.target.value))}
-                aria-label="Replay speed"
-              >
-                {[0.25, 0.5, 1, 2, 4].map((speed) => (
-                  <option key={speed} value={speed}>
-                    {speed}x
-                  </option>
-                ))}
-              </select>
-            </div>
-            <input
-              className="timeline"
-              type="range"
-              min="0"
-              max={Math.max(replayMeta.duration, 0.1)}
-              step="0.1"
-              value={Math.min(replayTime, Math.max(replayMeta.duration, 0.1))}
-              onChange={(event) => scrubReplay(event.target.value)}
-              aria-label="Replay timeline"
-            />
-            <p className="noteText">
-              {replayIndex.toLocaleString()} of {replayPackets.length.toLocaleString()} packets replayed.
-            </p>
-            <div className="analysisPanel" aria-label="Wireshark-inspired analysis">
-              <section>
-                <h3>Name resolution</h3>
-                <div className="labelModeGrid">
-                  {Object.entries(LABEL_MODES).map(([mode, label]) => (
-                    <button
-                      className={labelMode === mode ? 'active' : ''}
-                      key={mode}
-                      type="button"
-                      onClick={() => setLabelMode(mode)}
-                    >
-                      {label}
-                    </button>
-                  ))}
+            {captureMessage && <p className="permissionError">{captureMessage}</p>}
+            <button className="primaryAction" type="button" onClick={requestCapture}>
+              {needsCapturePermission ? 'Start live capture' : 'Restart live view'}
+            </button>
+          </div>
+        ) : (
+          <div className="sourcePanel">
+            <label className="uploadZone">
+              <input type="file" accept=".pcap,.pcapng" onChange={handleReplayFile} />
+              <strong>Upload .pcap or .pcapng</strong>
+            </label>
+            {replayError && <p className="permissionError">{replayError}</p>}
+            {replayMeta && (
+              <>
+                <dl className="replayStats">
+                  <div><dt>File</dt><dd>{replayMeta.name}</dd></div>
+                  <div><dt>Parsed</dt><dd>{replayMeta.parsed.toLocaleString()}</dd></div>
+                  <div><dt>Skipped</dt><dd>{replayMeta.skipped.toLocaleString()}</dd></div>
+                  <div><dt>Time</dt><dd>{replayTime.toFixed(1)}s</dd></div>
+                </dl>
+                <div className="playbackControls">
+                  <button type="button" disabled={!replayPackets.length} onClick={() => setReplayState(replayState === 'playing' ? 'paused' : 'playing')}>{replayState === 'playing' ? 'Pause' : 'Play'}</button>
+                  <button type="button" disabled={!replayPackets.length} onClick={() => restartReplay('paused')}>Restart</button>
+                  <select value={replaySpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))}>
+                    {[0.25, 0.5, 1, 2, 4].map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
+                  </select>
                 </div>
-              </section>
-
-              <section>
-                <h3>Protocol breakdown</h3>
-                <div className="miniRows">
-                  {replayAnalysis.protocols.slice(0, 5).map((protocol) => (
-                    <span key={protocol.proto}>
-                      <i style={{ background: PROTOCOLS[protocol.proto]?.css || PROTOCOLS.OTHER.css }} />
-                      {protocol.proto} {byteLabel(protocol.bytes)}
-                    </span>
-                  ))}
-                  {replayAnalysis.protocols.length === 0 && <p className="emptyText">No packets parsed yet.</p>}
-                </div>
-              </section>
-
-              <section>
-                <h3>Endpoints</h3>
-                <div className="miniRows">
-                  {replayAnalysis.endpoints.slice(0, 5).map((endpoint) => (
-                    <button type="button" key={endpoint.ip} onClick={() => setSelectedIp(endpoint.ip)}>
-                      {endpoint.ip} {byteLabel(endpoint.bytes)}
-                    </button>
-                  ))}
-                </div>
-              </section>
-
-              <section>
-                <h3>I/O timeline</h3>
-                <div className="ioTimeline" aria-label="Replay traffic timeline">
-                  {replayAnalysis.timelineBuckets.map((bytes, index) => (
-                    <i
-                      key={`${index}-${bytes}`}
-                      style={{ height: `${Math.max(4, (bytes / replayAnalysis.maxBucket) * 44)}px` }}
-                    />
-                  ))}
-                </div>
-              </section>
-            </div>
-          </>
+                <input className="timeline" type="range" min="0" max={Math.max(replayMeta.duration, 0.1)} step="0.1" value={Math.min(replayTime, Math.max(replayMeta.duration, 0.1))} onChange={(event) => scrubReplay(event.target.value)} />
+                <p className="noteText">{replayIndex.toLocaleString()} of {replayPackets.length.toLocaleString()} packets replayed.</p>
+              </>
+            )}
+          </div>
         )}
       </section>
     ),
-    instructions: (
-      <section className="tabContent" aria-label="Instructions">
-        <div className="modeHeading">
-          <p>Instructions</p>
-          <h2>Two ways to investigate packet flow.</h2>
+    stats: (
+      <section className="analysisTab">
+        <div className="analysisHeader"><p>Whole Network</p><h2>Filtered network summary</h2></div>
+        <div className="metricGrid">
+          <div><span>Hosts</span><strong>{trafficAnalysis.endpoints.length.toLocaleString()}</strong></div>
+          <div><span>Links</span><strong>{trafficAnalysis.conversations.length.toLocaleString()}</strong></div>
+          <div><span>Total Data</span><strong>{byteLabel(filteredPackets.reduce((total, packet) => total + packet.size, 0))}</strong></div>
+          <div><span>Throughput</span><strong>{byteLabel(currentThroughput)}/s</strong></div>
         </div>
-        <div className="instructionList">
-          <p>
-            <strong>Live Capture</strong> maps traffic from your machine or network right now. It
-            requires local packet access through the Python helper.
-          </p>
-          <p>
-            <strong>Replay PCAP</strong> maps a saved capture without starting the Python server.
-            Upload a file and use playback controls to inspect activity over time.
-          </p>
-          <p>
-            Install once with <code>pip install websockets scapy</code> and{' '}
-            <code>npm install --prefix client</code>. Start with <code>{liveCommand}</code>.
-          </p>
+        <div className="analysisSplit">
+          <section><h3>Top Talkers</h3>{trafficAnalysis.endpoints.slice(0, 8).map((endpoint) => <button className="dataRow" key={endpoint.ip} type="button" onClick={() => setSelectedIp(endpoint.ip)}><span>{endpoint.ip}</span><strong>{byteLabel(endpoint.bytes)}</strong></button>)}</section>
+          <section><h3>Protocol Distribution</h3>{trafficAnalysis.protocols.map((protocol) => <button className="dataRow" key={protocol.proto} type="button" onClick={() => { setSelectedProtocol(protocol.proto); setFilterInput(protocol.proto.toLowerCase()); setActiveFilter(parseDisplayFilter(protocol.proto.toLowerCase())) }}><span>{protocol.proto}</span><strong>{Math.round((protocol.bytes / protocolTotalBytes) * 100)}%</strong></button>)}</section>
         </div>
-        <div className="protocolLegend" aria-label="Protocol colors">
-          {Object.entries(PROTOCOLS).map(([key, protocol]) => (
-            <span key={key}>
-              <i style={{ background: protocol.css }} />
-              {protocol.label}
-            </span>
-          ))}
-        </div>
+      </section>
+    ),
+    conversations: (
+      <section className="analysisTab">
+        <div className="analysisHeader"><p>Conversations</p><h2>Communication pairs</h2></div>
+        <div className="dataTable sixCol">{['Source', 'Destination', 'Protocol', 'Packets', 'Bytes', 'Rate'].map((heading) => <strong key={heading}>{heading}</strong>)}{trafficAnalysis.conversations.slice(0, LARGE_TABLE_ROW_LIMIT).map((conversation) => <button className={conversation.key === selectedConversationKey ? 'selected tableRow' : 'tableRow'} key={conversation.key} type="button" onClick={() => { setSelectedConversationKey(conversation.key); setSelectedIp(conversation.src); pointTargetRef.current = { active: true, ip: conversation.src, x: 0, y: 0 } }}><span>{conversation.src}</span><span>{conversation.dst}</span><span>{conversation.proto}</span><span>{conversation.packets.toLocaleString()}</span><span>{byteLabel(conversation.bytes)}</span><span>{byteLabel(conversation.rate)}/s</span></button>)}</div>
+      </section>
+    ),
+    endpoints: (
+      <section className="analysisTab">
+        <div className="analysisHeader"><p>Endpoints</p><h2>Hosts and devices</h2></div>
+        <div className="dataTable sixCol">{['Endpoint', 'MAC', 'Packets', 'Bytes', 'Inbound', 'Protocols'].map((heading) => <strong key={heading}>{heading}</strong>)}{trafficAnalysis.endpoints.slice(0, LARGE_TABLE_ROW_LIMIT).map((endpoint) => <button className={endpoint.ip === selectedIp ? 'selected tableRow' : 'tableRow'} key={endpoint.ip} type="button" onClick={() => setSelectedIp(endpoint.ip)}><span>{endpoint.ip}</span><span>{endpoint.mac || '-'}</span><span>{endpoint.packets.toLocaleString()}</span><span>{byteLabel(endpoint.bytes)}</span><span>{byteLabel(endpoint.bytes)}</span><span>{endpoint.protocols || '-'}</span></button>)}</div>
+      </section>
+    ),
+    protocols: (
+      <section className="analysisTab">
+        <div className="analysisHeader"><p>Protocol Hierarchy</p><h2>Observed protocol breakdown</h2></div>
+        <div className="protocolTree">{trafficAnalysis.protocols.map((protocol) => <button className={selectedProtocol === protocol.proto ? 'selected protocolNode' : 'protocolNode'} key={protocol.proto} type="button" onClick={() => { setSelectedProtocol(protocol.proto); setFilterInput(protocol.proto.toLowerCase()); setActiveFilter(parseDisplayFilter(protocol.proto.toLowerCase())) }}><span><i style={{ background: PROTOCOLS[protocol.proto]?.css || PROTOCOLS.OTHER.css }} />Frame / {protocol.proto}</span><strong>{protocol.packets.toLocaleString()} pkts · {byteLabel(protocol.bytes)} · {Math.round((protocol.bytes / protocolTotalBytes) * 100)}%</strong></button>)}</div>
+      </section>
+    ),
+    io: (
+      <section className="analysisTab">
+        <div className="analysisHeader"><p>I/O Graphs</p><h2>Traffic over time</h2></div>
+        <div className="wideTimeline">{trafficAnalysis.timelineBuckets.map((bytes, index) => <i key={`${index}-${bytes}`} style={{ height: `${Math.max(4, (bytes / trafficAnalysis.maxBucket) * 180)}px` }} title={byteLabel(bytes)} />)}</div>
       </section>
     ),
   }
@@ -2039,302 +2055,151 @@ export default function App() {
   return (
     <main className="appShell">
       <HeroAsciiOne>
-        <nav className="appTabs" aria-label="PacMap tabs">
-          {Object.entries(TABS).map(([tab, label]) => (
-            <button
-              className={activeTab === tab ? 'appTab active' : 'appTab'}
-              key={tab}
-              type="button"
-              onClick={() => {
-                setActiveTab(tab)
-                if (tab === 'live' || tab === 'replay') {
-                  setAppMode(tab)
-                  resetGraphRef.current?.()
-                  setReplayState(tab === 'replay' && replayPackets.length ? 'paused' : 'idle')
-                  setReplayIndex(0)
-                  setReplayTime(0)
-                }
-              }}
-            >
-              {label}
-            </button>
-          ))}
-        </nav>
-
-        <section
-          className={activeTab !== 'instructions' ? 'viewport' : 'viewport tabHidden'}
-          aria-label={`${TABS[activeTab]} packet map`}
-        >
-        <div ref={mountRef} className="canvasMount" />
-
-        {isWorkflowPanelOpen && activeTab === 'live' && activeTabContent.live}
-        {isWorkflowPanelOpen && activeTab === 'replay' && activeTabContent.replay}
-
-        <header className="topBar" aria-label="App status">
-          <div className="brandBlock">
-            <p>pacmap</p>
-          </div>
-        </header>
-
-        <section className="graphToolbar" aria-label="Graph controls">
-          {activeTab !== 'instructions' && (
-            <button type="button" onClick={() => setIsWorkflowPanelOpen((open) => !open)}>
-              {isWorkflowPanelOpen ? 'Hide panel' : 'Panel'}
-            </button>
-          )}
-          <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom + 0.2))}>
-            Zoom in
-          </button>
-          <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom - 0.2))}>
-            Zoom out
-          </button>
-          <button type="button" onClick={() => setCameraZoom(DEFAULT_CAMERA_ZOOM)}>
-            Reset zoom
-          </button>
-          <select value={labelMode} onChange={(event) => setLabelMode(event.target.value)} aria-label="Node labels">
-            {Object.entries(LABEL_MODES).map(([mode, label]) => (
-              <option key={mode} value={mode}>
-                {label}
-              </option>
-            ))}
-          </select>
-          <button type="button" onClick={() => setIsStatsDrawerOpen((open) => !open)}>
-            {isStatsDrawerOpen ? 'Hide stats' : 'Stats'}
-          </button>
-          <span>{Math.round(cameraZoom * 100)}%</span>
-        </section>
-
-        <button
-          className="drawerToggle"
-          type="button"
-          aria-expanded={isDeviceDrawerOpen}
-          onClick={() => setIsDeviceDrawerOpen((open) => !open)}
-        >
-          Devices <strong>{nodes.length}</strong>
-        </button>
-
-        {selectedIp && (
-          <button className="wholeNetworkButton" type="button" onClick={() => setSelectedIp(null)}>
-            Whole network
-          </button>
-        )}
-
-        <aside
-          className={isDeviceDrawerOpen ? 'deviceDrawer open' : 'deviceDrawer'}
-          aria-label="Largest connected devices"
-        >
-          <section className="panel">
-            <div className="panelTitle">
-              <h2>Largest devices</h2>
-              <button type="button" onClick={() => setIsDeviceDrawerOpen(false)}>
-                Close
-              </button>
-            </div>
-            <div className="nodeList">
-              {nodes.slice(0, NODE_LIMIT).map((node) => (
-                <button
-                  className={node.ip === selectedIp ? 'nodeRow selected' : 'nodeRow'}
-                  key={node.ip}
-                  type="button"
-                  onClick={() => setSelectedIp(node.ip)}
-                >
-                  <span>{node.ip}</span>
-                  <strong>{byteLabel(node.bytes)}</strong>
-                </button>
-              ))}
-              {nodes.length === 0 && (
-                <p className="emptyText">Start capture, then use the network normally.</p>
-              )}
-            </div>
-          </section>
-
-          {selectedNode && (
-            <section className="panel selectedPanel">
-              <div className="panelTitle">
-                <h2>{selectedNode.ip}</h2>
-                <button type="button" onClick={() => setSelectedIp(null)}>
-                  Clear focus
-                </button>
-              </div>
-              <dl>
-                <div>
-                  <dt>Total data</dt>
-                  <dd>{byteLabel(selectedNode.bytes)}</dd>
-                </div>
-                <div>
-                  <dt>Packets</dt>
-                  <dd>{selectedNode.packets.toLocaleString()}</dd>
-                </div>
-              </dl>
-              <div className="focusSummary">
-                <span>{selectedNeighborhood.oneHop.length} direct</span>
-                <span>{visibleEdges.length} links</span>
-              </div>
-              {selectedNeighborhood.oneHop.length > 0 && (
-                <div className="neighborList" aria-label="Direct neighbors">
-                  {selectedNeighborhood.oneHop.slice(0, 8).map((ip) => (
-                    <button type="button" key={ip} onClick={() => setSelectedIp(ip)}>
-                      {ip}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </section>
-          )}
-        </aside>
-
-        {activeTab === 'live' && (
-        <aside
-          className={isStatsDrawerOpen ? 'statsDrawer open' : 'statsDrawer'}
-          aria-label="Live network statistics"
-        >
-          <div className="statsHeader">
-            <div>
-              <p>Network stats</p>
-              <h2>{selectedNode ? selectedNode.ip : 'Whole network'}</h2>
-            </div>
-            <button type="button" onClick={() => setIsStatsDrawerOpen((open) => !open)}>
-              {isStatsDrawerOpen ? 'Collapse' : 'Expand'}
-            </button>
-          </div>
-
-          <div className="statsGrid">
-            <section>
-              <h3>Selected host</h3>
-              {selectedNode ? (
-                <dl>
-                  <div>
-                    <dt>Total data</dt>
-                    <dd>{byteLabel(selectedNode.bytes)}</dd>
-                  </div>
-                  <div>
-                    <dt>Packets</dt>
-                    <dd>{selectedNode.packets.toLocaleString()}</dd>
-                  </div>
-                  <div>
-                    <dt>Direct peers</dt>
-                    <dd>{selectedNeighborhood.oneHop.length.toLocaleString()}</dd>
-                  </div>
-                  <div>
-                    <dt>Active links</dt>
-                    <dd>{visibleEdges.length.toLocaleString()}</dd>
-                  </div>
-                </dl>
-              ) : (
-                <p className="emptyText">Click a node to inspect host statistics.</p>
-              )}
-            </section>
-
-            <section>
-              <h3>Network summary</h3>
-              <dl>
-                <div>
-                  <dt>Hosts</dt>
-                  <dd>{networkStats.hosts.toLocaleString()}</dd>
-                </div>
-                <div>
-                  <dt>Links</dt>
-                  <dd>{networkStats.links.toLocaleString()}</dd>
-                </div>
-                <div>
-                  <dt>Packets</dt>
-                  <dd>{networkStats.totalPackets.toLocaleString()}</dd>
-                </div>
-                <div>
-                  <dt>Data</dt>
-                  <dd>{byteLabel(networkStats.totalBytes)}</dd>
-                </div>
-              </dl>
-            </section>
-
-            <section>
-              <h3>Top hosts</h3>
-              <div className="statsRows">
-                {nodes.slice(0, 6).map((node) => (
-                  <button
-                    className={node.ip === selectedIp ? 'statsRow selected' : 'statsRow'}
-                    key={node.ip}
-                    type="button"
-                    onClick={() => setSelectedIp(node.ip)}
-                  >
-                    <span>{node.ip}</span>
-                    <strong>{byteLabel(node.bytes)}</strong>
-                  </button>
-                ))}
-                {nodes.length === 0 && (
-                  <p className="emptyText">Start live capture or replay a PCAP to populate the map.</p>
-                )}
-              </div>
-            </section>
-
-            <section>
-              <h3>Top conversations</h3>
-              <div className="statsRows">
-                {topConversations.map((edge) => (
-                  <button
-                    className="statsRow conversation"
-                    key={edge.key}
-                    type="button"
-                    onClick={() => setSelectedIp(edge.src)}
-                  >
-                    <span>
-                      {edge.src} to {edge.dst}
-                    </span>
-                    <strong>{byteLabel(edge.bytes)}</strong>
-                  </button>
-                ))}
-                {topConversations.length === 0 && (
-                  <p className="emptyText">Upload a capture, then press Play.</p>
-                )}
-              </div>
-            </section>
-          </div>
-        </aside>
-        )}
-
-        {activeTab === 'replay' && replayMeta && (
-          <aside
-            className={isConversationRankOpen ? 'conversationRank open' : 'conversationRank'}
-            aria-label="Conversations ranked by traffic"
-          >
-            <div className="rankHeader">
+        <div className={menuCollapsed ? 'appFrame menuCollapsed' : 'appFrame'}>
+          <nav className="appMenu" aria-label="PacMap menu">
+            <div className="appMenuBrand">
               <div>
-                <p>Conversations</p>
-                <h2>Ranked by data transferred</h2>
+                <strong>pacmap</strong>
+                <span>{status}</span>
               </div>
-              <select value={conversationSort} onChange={(event) => setConversationSort(event.target.value)}>
-                <option value="bytes">Bytes</option>
-                <option value="packets">Packets</option>
-                <option value="rate">Rate</option>
-                <option value="recent">Recent</option>
-              </select>
-              <button type="button" onClick={() => setIsConversationRankOpen((open) => !open)}>
-                {isConversationRankOpen ? 'Collapse' : 'Expand'}
+              <button
+                className="menuCollapseButton"
+                type="button"
+                onClick={() => setMenuCollapsed((collapsed) => !collapsed)}
+                aria-label={menuCollapsed ? 'Expand menu' : 'Collapse menu'}
+                title={menuCollapsed ? 'Expand menu' : 'Collapse menu'}
+              >
+                {menuCollapsed ? '>' : '<'}
               </button>
             </div>
-            <div className="rankRows">
-              {replayAnalysis.conversations.slice(0, isConversationRankOpen ? 12 : 3).map((conversation) => (
+            <div className="appMenuItems">
+              {Object.entries(TABS).map(([tab, label]) => (
                 <button
-                  className="rankRow"
-                  key={conversation.key}
+                  className={activeTab === tab ? 'appMenuItem active' : 'appMenuItem'}
+                  key={tab}
                   type="button"
-                  onClick={() => setSelectedIp(conversation.src)}
+                  onClick={() => {
+                    setActiveTab(tab)
+                  }}
+                  title={label}
                 >
-                  <span>{conversation.src} to {conversation.dst}</span>
-                  <strong>{byteLabel(conversation.bytes)}</strong>
-                  <em>{conversation.packets.toLocaleString()} pkts</em>
+                  <span className="appMenuShort" aria-hidden="true">
+                    {label.split(' ').map((word) => word[0]).join('').slice(0, 2)}
+                  </span>
+                  <span className="appMenuFull">{label}</span>
                 </button>
               ))}
             </div>
-          </aside>
-        )}
+          </nav>
 
-        </section>
-        {activeTab === 'instructions' && (
-          <section className="tabPage" aria-label={`${TABS[activeTab]} tab`}>
-            {activeTabContent[activeTab]}
+          <section
+            className={activeTab === 'live' ? 'viewport liveViewport' : 'viewport analysisViewport'}
+            aria-label={`${TABS[activeTab]} packet map`}
+          >
+          {showLiveWorkspaceControls && (
+            <form className="trafficFilterBar" onSubmit={applyDisplayFilter}>
+              <span>Display Filter</span>
+              <input value={filterInput} onChange={(event) => setFilterInput(event.target.value)} placeholder="tcp.port == 443" />
+              <button type="submit">Apply</button>
+              <button type="button" onClick={clearDisplayFilter}>Clear</button>
+              {filterError && <p className="filterError">{filterError}</p>}
+            </form>
+          )}
+          <div ref={mountRef} className="canvasMount" />
+          {pointReticle.active && (
+            <div
+              className={[
+                'pointReticle',
+                pointReticle.locked ? 'locked' : '',
+                pointReticle.lockProgress > 0 ? 'locking' : '',
+              ].filter(Boolean).join(' ')}
+              aria-hidden="true"
+              style={{
+                left: `${pointReticle.x}px`,
+                top: `${pointReticle.y}px`,
+                '--lock-progress': `${Math.round(pointReticle.lockProgress * 100)}%`,
+                '--reticle-scale': reticleScale,
+              }}
+            />
+          )}
+
+          {analysisContent[activeTab]}
+
+          <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls">
+            {!showLiveWorkspaceControls && (
+              <>
+                <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom + 0.2))}>
+                  Zoom in
+                </button>
+                <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom - 0.2))}>
+                  Zoom out
+                </button>
+                <button type="button" onClick={() => setCameraZoom(DEFAULT_CAMERA_ZOOM)}>
+                  Reset zoom
+                </button>
+                <select value={labelMode} onChange={(event) => setLabelMode(event.target.value)} aria-label="Node labels">
+                  {Object.entries(LABEL_MODES).map(([mode, label]) => (
+                    <option key={mode} value={mode}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            <button
+              type="button"
+              style={{ color: gesturesEnabled ? '#4af0b4' : undefined }}
+              onClick={() => setGesturesEnabled(e => !e)}
+            >
+              {gesturesEnabled ? '✋ ON' : '✋ Gestures'}
+            </button>
+            {!showLiveWorkspaceControls && <span>{Math.round(cameraZoom * 100)}%</span>}
           </section>
-        )}
+
+          {selectedIp && activeTab !== 'live' && (
+            <button className="wholeNetworkButton" type="button" onClick={() => setSelectedIp(null)}>
+              Whole network
+            </button>
+          )}
+          <section className="packetInspector" aria-label="Packet inspection">
+            <div className="inspectorPane packetList">
+              <h3>Packet List</h3>
+              <div className="packetTable">
+                {['Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'].map((heading) => <strong key={heading}>{heading}</strong>)}
+                {packetRows.map((packet) => (
+                  <button
+                    className={packet.id === selectedPacketId ? 'selected tableRow' : 'tableRow'}
+                    key={packet.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedPacketId(packet.id)
+                      setSelectedIp(packet.src || packet.srcIp)
+                    }}
+                  >
+                    <span>{new Date((packet.timestamp || 0) * 1000).toLocaleTimeString()}</span>
+                    <span>{packet.src || packet.srcIp}</span>
+                    <span>{packet.dst || packet.dstIp}</span>
+                    <span>{packet.proto}</span>
+                    <span>{packet.size}</span>
+                    <span>{packetInfo(packet)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="inspectorPane">
+              <h3>Packet Details</h3>
+              {packetDetails.length ? packetDetails.map(([label, value]) => (
+                <p className="detailLine" key={label}><strong>{label}</strong><span>{value}</span></p>
+              )) : <p className="emptyText">Select a packet.</p>}
+            </div>
+            <div className="inspectorPane">
+              <h3>Packet Bytes</h3>
+              <pre>{packetBytesText}</pre>
+            </div>
+          </section>
+
+          </section>
+        </div>
       </HeroAsciiOne>
     </main>
   )

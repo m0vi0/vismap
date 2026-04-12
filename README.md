@@ -11,7 +11,7 @@ PacMap supports two workflows in the web app:
 - Live Capture: inspect what is happening right now on a local interface.
 - Replay PCAP: upload a saved `.pcap` or `.pcapng` file and replay packet flow over time.
 
-The app includes separate Live Capture, Replay PCAP, and Instructions tabs. Live traffic appears in the Live tab. Uploaded captures appear in the Replay tab with playback and analysis controls.
+The app opens on Live Capture and uses Wireshark-inspired analysis tabs for Whole Network Stats, Conversations, Endpoints, Protocol Hierarchy, and I/O Graphs. PCAP upload and replay live inside the Live Capture tab as an alternate input source.
 
 ## Install
 
@@ -59,7 +59,7 @@ On Windows, run the terminal as Administrator.
 
 ## Replay PCAP
 
-Open the web app and choose the Replay PCAP tab. Upload a `.pcap` or `.pcapng` file, then use:
+Open the web app, choose Live Capture, switch the source to PCAP Replay, and upload a `.pcap` or `.pcapng` file. Then use:
 
 - play
 - pause
@@ -93,6 +93,33 @@ ws://127.0.0.1:8765
 
 PCAP replay is different: the browser reads the uploaded file and reuses the same graph visualization without needing live packet access.
 
+## Hand Gestures
+
+PacMap can use MediaPipe hand tracking for graph navigation. Navigation modes are:
+
+```text
+Zoom, Rotate, Move
+```
+
+- Zoom changes node spacing, not camera distance.
+- Rotate changes graph yaw and pitch.
+- Move pans the cluster.
+- Pointer targets nodes.
+
+Zoom, Rotate, and Move use the same lock flow: hold the gesture stable for 1 second in the background, then the visible ring completes in 0.5 seconds. Any completed navigation lock enters Pointer mode. The lock tolerates normal hand jitter by checking both finger spacing and finger position in the camera frame.
+
+In Pointer mode, thumb-index taps jump directly to navigation modes:
+
+- single tap: Rotate
+- double tap: Zoom
+- triple tap: Move
+
+Pointer mode also supports node selection lock. Aim at a node and hold steady with the same lock behavior: after the silent stability check, the ring completes and locks that node for inspection. The selected node and its local neighbors stay emphasized until cleared.
+
+Open your hand in Pointer mode to clear the selected node and return to normal pointer targeting.
+
+If tracking is temporarily lost in Pointer mode, PacMap pauses at the last stable pointer/view state. It does not reset the cluster, camera orientation, or current context.
+
 ## Development
 
 Frontend only:
@@ -102,6 +129,13 @@ cd client
 npm install
 npm run dev
 ```
+
+Client UI conventions:
+
+- Vite resolves `@` to `client/src`.
+- shadcn-style UI components live in `client/src/components/ui`.
+- Shared utilities live in `client/src/lib`.
+- Tailwind CSS is enabled through the Vite client config.
 
 Production build:
 
