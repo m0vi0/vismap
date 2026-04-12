@@ -640,15 +640,15 @@ function buildTrafficAnalysis(packets, replayMeta, conversationSort = 'bytes') {
     conversation.last = Math.max(conversation.last, packetTime)
     conversations.set(convoKey, conversation)
 
-    ;[src, dst].forEach((ip) => {
-      const endpoint = endpoints.get(ip) || { ip, bytes: 0, packets: 0, protocols: new Set(), mac: '' }
-      endpoint.bytes += size
-      endpoint.packets += 1
-      endpoint.protocols.add(proto)
-      if (ip === packet.srcIp && packet.srcMac) endpoint.mac = packet.srcMac
-      if (ip === packet.dstIp && packet.dstMac) endpoint.mac = packet.dstMac
-      endpoints.set(ip, endpoint)
-    })
+      ;[src, dst].forEach((ip) => {
+        const endpoint = endpoints.get(ip) || { ip, bytes: 0, packets: 0, protocols: new Set(), mac: '' }
+        endpoint.bytes += size
+        endpoint.packets += 1
+        endpoint.protocols.add(proto)
+        if (ip === packet.srcIp && packet.srcMac) endpoint.mac = packet.srcMac
+        if (ip === packet.dstIp && packet.dstMac) endpoint.mac = packet.dstMac
+        endpoints.set(ip, endpoint)
+      })
 
     const protocol = protocols.get(proto) || { proto, bytes: 0, packets: 0 }
     protocol.bytes += size
@@ -816,7 +816,7 @@ export default function App() {
   const pointTargetRef = useRef({ active: false, ip: null, x: 0, y: 0 })
   const pointerLockedIpRef = useRef(null)
   const orbitStateRef = useRef({
-    isPointerDown: false, lastX: 0, lastY: 0,
+    isPointerDown: false, isDrag: false, lastX: 0, lastY: 0,
     theta: Math.PI * 0.18, phi: Math.PI * 0.28, radius: 820,
     panX: 0, panY: 0, panZ: 0,
     recenterPan: false,
@@ -1510,7 +1510,6 @@ export default function App() {
     }
 
     function handlePointerDown(event) {
-      // node selection (existing raycaster logic)
       const bounds = renderer.domElement.getBoundingClientRect()
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
@@ -1522,11 +1521,9 @@ export default function App() {
         pointTargetRef.current = { active: true, ip: hit.object.userData.ip, x: 0, y: 0 }
         setSelectedIp(hit.object.userData.ip)
       } else {
-        // start orbit drag only if not hitting a node
-        pointerLockedIpRef.current = null
-        pointTargetRef.current = { active: false, ip: null, x: 0, y: 0 }
-        if (selectedIpRef.current) setSelectedIp(null)
+        // start drag — do NOT clear selection here
         orbitStateRef.current.isPointerDown = true
+        orbitStateRef.current.isDrag = false
         orbitStateRef.current.lastX = event.clientX
         orbitStateRef.current.lastY = event.clientY
       }
@@ -1537,15 +1534,36 @@ export default function App() {
       if (!orbit.isPointerDown) return
       const dx = event.clientX - orbit.lastX
       const dy = event.clientY - orbit.lastY
-      orbit.theta -= dx * 0.006
-      orbit.phi = THREE.MathUtils.clamp(orbit.phi + dy * 0.006, 0.08, Math.PI - 0.08)
+      orbit.isDrag = true
+
+      if (event.shiftKey) {
+        const panSpeed = orbit.radius * 0.001
+        orbit.target.x -= dx * panSpeed
+        orbit.target.y += dy * panSpeed
+      } else {
+        orbit.theta -= dx * 0.006
+        orbit.phi = THREE.MathUtils.clamp(orbit.phi + dy * 0.006, 0.08, Math.PI - 0.08)
+      }
+
       orbit.lastX = event.clientX
       orbit.lastY = event.clientY
       applyOrbit()
     }
 
-    function handlePointerUp() {
+    function handlePointerUp(event) {
+      const wasDrag = orbitStateRef.current.isDrag
       orbitStateRef.current.isPointerDown = false
+      orbitStateRef.current.isDrag = false
+
+      if (!wasDrag && selectedIpRef.current) {
+        const bounds = renderer.domElement.getBoundingClientRect()
+        pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
+        pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
+        raycaster.setFromCamera(pointer, camera)
+        const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.mesh)
+        const hit = raycaster.intersectObjects(meshes, false)[0]
+        if (!hit) setSelectedIp(null)
+      }
     }
     function handleWheel(event) {
       event.preventDefault()
@@ -2127,110 +2145,99 @@ export default function App() {
             className={activeTab === 'live' ? 'viewport liveViewport' : 'viewport analysisViewport'}
             aria-label={`${TABS[activeTab]} packet map`}
           >
-          {showLiveWorkspaceControls && (
-            <form className="trafficFilterBar" onSubmit={applyDisplayFilter}>
-              <span>Display Filter</span>
-              <input value={filterInput} onChange={(event) => setFilterInput(event.target.value)} placeholder="tcp.port == 443" />
-              <button type="submit">Apply</button>
-              <button type="button" onClick={clearDisplayFilter}>Clear</button>
-              {filterError && <p className="filterError">{filterError}</p>}
-            </form>
-          )}
-          <div ref={mountRef} className="canvasMount" />
-          {pointReticle.active && (
-            <div
-              className={[
-                'pointReticle',
-                pointReticle.locked ? 'locked' : '',
-                pointReticle.lockProgress > 0 ? 'locking' : '',
-              ].filter(Boolean).join(' ')}
-              aria-hidden="true"
-              style={{
-                left: `${pointReticle.x}px`,
-                top: `${pointReticle.y}px`,
-                '--lock-progress': `${Math.round(pointReticle.lockProgress * 100)}%`,
-                '--reticle-scale': reticleScale,
-              }}
-            />
-          )}
-
-          {analysisContent[activeTab]?.()}
-
-          <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls">
-            {!showLiveWorkspaceControls && (
-              <>
-                <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom + 0.2))}>
-                  Zoom in
-                </button>
-                <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom - 0.2))}>
-                  Zoom out
-                </button>
-                <button type="button" onClick={() => setCameraZoom(DEFAULT_CAMERA_ZOOM)}>
-                  Reset zoom
-                </button>
-                <select value={labelMode} onChange={(event) => setLabelMode(event.target.value)} aria-label="Node labels">
-                  {Object.entries(LABEL_MODES).map(([mode, label]) => (
-                    <option key={mode} value={mode}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              </>
+            {showLiveWorkspaceControls && (
+              <form className="trafficFilterBar" onSubmit={applyDisplayFilter}>
+                <span>Display Filter</span>
+                <input value={filterInput} onChange={(event) => setFilterInput(event.target.value)} placeholder="tcp.port == 443" />
+                <button type="submit">Apply</button>
+                <button type="button" onClick={clearDisplayFilter}>Clear</button>
+                {filterError && <p className="filterError">{filterError}</p>}
+              </form>
             )}
-            <button
-              type="button"
-              style={{ color: gesturesEnabled ? '#4af0b4' : undefined }}
-              onClick={() => setGesturesEnabled(e => !e)}
-            >
-              {gesturesEnabled ? '✋ ON' : '✋ Gestures'}
-            </button>
-            {!showLiveWorkspaceControls && <span>{Math.round(cameraZoom * 100)}%</span>}
-          </section>
+            <div ref={mountRef} className="canvasMount" />
+            {pointReticle.active && (
+              <div
+                className={[
+                  'pointReticle',
+                  pointReticle.locked ? 'locked' : '',
+                  pointReticle.lockProgress > 0 ? 'locking' : '',
+                ].filter(Boolean).join(' ')}
+                aria-hidden="true"
+                style={{
+                  left: `${pointReticle.x}px`,
+                  top: `${pointReticle.y}px`,
+                  '--lock-progress': `${Math.round(pointReticle.lockProgress * 100)}%`,
+                  '--reticle-scale': reticleScale,
+                }}
+              />
+            )}
 
-          {selectedIp && activeTab !== 'live' && (
-            <button className="wholeNetworkButton" type="button" onClick={() => setSelectedIp(null)}>
-              Whole network
-            </button>
-          )}
-          {analysisActive && (
-          <section className="packetInspector" aria-label="Packet inspection">
-            <div className="inspectorPane packetList">
-              <h3>Packet List</h3>
-              <div className="packetTable">
-                {['Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'].map((heading) => <strong key={heading}>{heading}</strong>)}
-                {packetRows.map((packet) => (
-                  <button
-                    className={packet.id === selectedPacketId ? 'selected tableRow' : 'tableRow'}
-                    key={packet.id}
-                    type="button"
-                    onClick={() => {
-                      setSelectedPacketId(packet.id)
-                      setSelectedIp(packet.src || packet.srcIp)
-                    }}
-                  >
-                    <span>{new Date((packet.timestamp || 0) * 1000).toLocaleTimeString()}</span>
-                    <span>{packet.src || packet.srcIp}</span>
-                    <span>{packet.dst || packet.dstIp}</span>
-                    <span>{packet.proto}</span>
-                    <span>{packet.size}</span>
-                    <span>{packetInfo(packet)}</span>
+            {analysisContent[activeTab]?.()}
+
+            <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls">
+              {!showLiveWorkspaceControls && (
+                <>
+                  <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom + 0.2))}>
+                    Zoom in
                   </button>
-                ))}
-              </div>
-            </div>
-            <div className="inspectorPane">
-              <h3>Packet Details</h3>
-              {packetDetails.length ? packetDetails.map(([label, value]) => (
-                <p className="detailLine" key={label}><strong>{label}</strong><span>{value}</span></p>
-              )) : <p className="emptyText">Select a packet.</p>}
-            </div>
-            <div className="inspectorPane">
-              <h3>Packet Bytes</h3>
-              <pre>{packetBytesText}</pre>
-            </div>
-          </section>
-          )}
+                  <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom - 0.2))}>
+                    Zoom out
+                  </button>
+                  <button type="button" onClick={() => setCameraZoom(DEFAULT_CAMERA_ZOOM)}>
+                    Reset zoom
+                  </button>
+                  <select value={labelMode} onChange={(event) => setLabelMode(event.target.value)} aria-label="Node labels">
+                    {Object.entries(LABEL_MODES).map(([mode, label]) => (
+                      <option key={mode} value={mode}>
+                        {label}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              )}
+              <button
+                type="button"
+                style={{ color: gesturesEnabled ? '#4af0b4' : undefined }}
+                onClick={() => setGesturesEnabled(e => !e)}
+              >
+                {gesturesEnabled ? '✋ ON' : '✋ Gestures'}
+              </button>
+              {!showLiveWorkspaceControls && <span>{Math.round(cameraZoom * 100)}%</span>}
+            </section>
 
+            {selectedIp && activeTab !== 'live' && (
+              <button className="wholeNetworkButton" type="button" onClick={() => setSelectedIp(null)}>
+                Whole network
+              </button>
+            )}
+            {analysisActive && (
+              <section className="packetInspector" aria-label="Packet inspection">
+                <div className="inspectorPane packetList">
+                  <h3>Packet List</h3>
+                  <div className="packetTable">
+                    {['Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'].map((heading) => <strong key={heading}>{heading}</strong>)}
+                    {packetRows.map((packet) => (
+                      <button
+                        className={packet.id === selectedPacketId ? 'selected tableRow' : 'tableRow'}
+                        key={packet.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedPacketId(packet.id)
+                          setSelectedIp(packet.src || packet.srcIp)
+                        }}
+                      >
+                        <span>{new Date((packet.timestamp || 0) * 1000).toLocaleTimeString()}</span>
+                        <span>{packet.src || packet.srcIp}</span>
+                        <span>{packet.dst || packet.dstIp}</span>
+                        <span>{packet.proto}</span>
+                        <span>{packet.size}</span>
+                        <span>{packetInfo(packet)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            )}
           </section>
         </div>
       </HeroAsciiOne>

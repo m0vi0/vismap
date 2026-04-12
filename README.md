@@ -44,7 +44,7 @@ Common interface examples:
 Open:
 
 ```text
-http://127.0.0.1:5173
+http://127.0.0.1:5176
 ```
 
 Then use the Live Capture tab and click `Start live capture`.
