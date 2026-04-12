@@ -120,6 +120,9 @@ Open your hand in Pointer mode to clear the selected node and return to normal p
 
 If tracking is temporarily lost in Pointer mode, PacMap pauses at the last stable pointer/view state. It does not reset the cluster, camera orientation, or current context.
 
+##GIF
+![pacmap demo](demo.gif)
+
 ## Development
 
 Frontend only:
