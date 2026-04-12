@@ -829,7 +829,7 @@ export default function App() {
   const snapshotGraphRef = useRef(null)
   const rebuildGraphRef = useRef(null)
 
-  const [gesturesEnabled, setGesturesEnabled] = useState(true)
+  const [gesturesEnabled, setGesturesEnabled] = useState(false)
   const gestureCleanupRef = useRef(null)
   const [pointReticle, setPointReticle] = useState({
     active: false,
@@ -840,6 +840,9 @@ export default function App() {
     lockProgress: 0,
     mode: 'zoom',
   })
+  const screensaverActiveRef = useRef(false)
+  const [screensaverActive, setScreensaverActive] = useState(false)
+  const screensaverRef = useRef({ timer: null, spinAngle: 0 })
   const [activeTab, setActiveTab] = useState('live')
   const [menuCollapsed, setMenuCollapsed] = useState(false)
   const [appMode, setAppMode] = useState('live')
@@ -953,6 +956,30 @@ export default function App() {
     cameraRef.current.zoom = cameraZoom
     cameraRef.current.updateProjectionMatrix()
   }, [cameraZoom])
+
+  useEffect(() => {
+    function resetTimer() {
+      if (screensaverRef.current.timer) clearTimeout(screensaverRef.current.timer)
+      if (screensaverActiveRef.current) {
+        screensaverActiveRef.current = false
+        setScreensaverActive(false)
+      }
+      screensaverRef.current.timer = setTimeout(() => {
+        screensaverActiveRef.current = true
+        setScreensaverActive(true)
+        setActiveTab('live')
+      }, 60000)
+    }
+
+    const events = ['mousemove', 'mousedown', 'keydown', 'wheel', 'touchstart', 'pointermove']
+    events.forEach(e => window.addEventListener(e, resetTimer, { passive: true }))
+    resetTimer()
+
+    return () => {
+      events.forEach(e => window.removeEventListener(e, resetTimer))
+      if (screensaverRef.current.timer) clearTimeout(screensaverRef.current.timer)
+    }
+  }, [])
 
   useEffect(() => {
     const mount = mountRef.current
@@ -1512,6 +1539,11 @@ export default function App() {
       updatePackets()
       updateOrbitTarget()
       applyOrbit()
+      if (screensaverActiveRef.current) {
+        screensaverRef.current.spinAngle += 0.002
+        orbitStateRef.current.theta = screensaverRef.current.spinAngle
+        applyOrbit()
+      }
 
       // cull labels by distance — only show closest 8 nodes
       const MAX_VISIBLE_LABELS = 8
@@ -2160,7 +2192,7 @@ export default function App() {
     <main className="appShell">
       <HeroAsciiOne>
         <div className={menuCollapsed ? 'appFrame menuCollapsed' : 'appFrame'}>
-          <nav className="appMenu" aria-label="PacMap menu">
+          <nav className="appMenu" aria-label="PacMap menu" style={{ visibility: screensaverActive ? 'hidden' : undefined }}>
             <div className="appMenuBrand">
               <div>
                 <strong>pacmap</strong>
@@ -2210,6 +2242,16 @@ export default function App() {
               </form>
             )}
             <div ref={mountRef} className="canvasMount" />
+            {screensaverActive && (
+              <div
+                onClick={() => setScreensaverActive(false)}
+                style={{
+                  position: 'absolute', inset: 0,
+                  zIndex: 9998, cursor: 'none',
+                  background: 'transparent',
+                }}
+              />
+            )}
             {pointReticle.active && (
               <div
                 className={[
@@ -2227,9 +2269,9 @@ export default function App() {
               />
             )}
 
-            {activeTab !== 'live' && analysisContent[activeTab]?.()}
+            {activeTab !== 'live' && !screensaverActive && analysisContent[activeTab]?.()}
 
-            <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls">
+            <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls" style={{ display: screensaverActive ? 'none' : undefined }}>
               {!showLiveWorkspaceControls && (
                 <>
                   <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom + 0.2))}>
