@@ -166,6 +166,37 @@ button {
   backdrop-filter: blur(16px);
 }
 
+.accordionBlock {
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.accordionSummary {
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text, #8892a4);
+  list-style: none;
+  user-select: none;
+}
+
+.accordionSummary::-webkit-details-marker { display: none; }
+
+.accordionBody {
+  padding: 0 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+details[open] .accordionSummary {
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  margin-bottom: 0;
+}
+
 .appMenuBrand {
   display: flex;
   min-width: 0;
@@ -394,7 +425,8 @@ button {
 .liveViewport .canvasMount {
   top: 86px;
   bottom: 16px;
-  left: 430px;
+  left: 0;
+  right: o;
 }
 
 .canvasMount canvas {

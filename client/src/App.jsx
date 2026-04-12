@@ -1239,7 +1239,7 @@ export default function App() {
           const dz = b.z - a.z
           const distanceSq = Math.max(dx * dx + dy * dy + dz * dz, 0.01)
           const distance = Math.sqrt(distanceSq)
-          const spacing = collisionNodeRadius(a) + collisionNodeRadius(b) + 34 + 58 * spreadForce
+          const spacing = collisionNodeRadius(a) * 10 + collisionNodeRadius(b) * 10 + 34 + 58 * spreadForce
           const repel = Math.min((spacing * spacing) / distanceSq, 4.4) * 0.072 * spreadForce
           const nx = dx / distance
           const ny = dy / distance
@@ -1404,9 +1404,18 @@ export default function App() {
         node.mesh.scale.lerp(new THREE.Vector3(scale + pulse, scale + pulse, scale + pulse), 0.18)
         node.mesh.material.opacity = THREE.MathUtils.lerp(node.mesh.material.opacity, visibleWeight, 0.12)
         node.label.visible = labelsEnabled
+        const maxBytes = Math.max(...[...nodeStore.values()].map(n => n.bytes), 1)
+        const importance = Math.log10(node.bytes + 1) / Math.log10(maxBytes + 1)
+        const importanceOpacity = THREE.MathUtils.clamp(importance, 0.08, 1)
+        const targetLabelOpacity = !labelsEnabled || (hasFocus && depth === undefined)
+          ? 0
+          : hasFocus
+            ? Math.max(visibleWeight, 0.88)
+            : importanceOpacity
+
         node.label.material.opacity = THREE.MathUtils.lerp(
           node.label.material.opacity,
-          !labelsEnabled ? 0 : hasFocus && depth === undefined ? 0.12 : Math.max(visibleWeight, labelOpacityFloor),
+          targetLabelOpacity,
           0.14,
         )
         node.label.position.y = 22 + scale * 7
@@ -1430,8 +1439,10 @@ export default function App() {
         const packetChattyness = THREE.MathUtils.clamp(Math.log1p(edge.recentPackets) / Math.log1p(9), 0, 1)
         const byteChattyness = THREE.MathUtils.clamp(Math.log1p(edge.recentBytes) / Math.log1p(9000), 0, 1)
         const chattyness = THREE.MathUtils.clamp(packetChattyness * 0.68 + byteChattyness * 0.32, 0, 1)
-        const baseOpacity = focusedEdge ? (chattyness > 0 ? 0.28 : 0.18) : 0.06
-        const activeOpacity = focusedEdge ? 0.96 : 0.24
+        const maxEdgeBytes = Math.max(...[...edgeStore.values()].map(e => e.bytes), 1)
+        const edgeImportance = Math.log10(edge.bytes + 1) / Math.log10(maxEdgeBytes + 1)
+        const baseOpacity = focusedEdge ? THREE.MathUtils.clamp(edgeImportance * 0.18, 0.01, 0.18) : 0.02
+        const activeOpacity = focusedEdge ? THREE.MathUtils.clamp(edgeImportance * 0.9 + 0.1, 0.1, 0.96) : 0.12
         const targetOpacity = baseOpacity + chattyness * (activeOpacity - baseOpacity)
         const positions = edge.mesh.geometry.attributes.position
         positions.setXYZ(0, a.x, a.y, a.z)
@@ -1501,6 +1512,23 @@ export default function App() {
       updatePackets()
       updateOrbitTarget()
       applyOrbit()
+
+      // cull labels by distance — only show closest 8 nodes
+      const MAX_VISIBLE_LABELS = 8
+      const cameraPos = camera.position
+      const nodesByDistance = [...nodeStore.values()]
+        .filter(n => n.group.visible)
+        .map(n => ({
+          node: n,
+          dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
+        }))
+        .sort((a, b) => a.dist - b.dist)
+
+      nodesByDistance.forEach(({ node }, index) => {
+        const withinLimit = index < MAX_VISIBLE_LABELS
+        const isSelected = node.ip === selectedIpRef.current
+        node.label.visible = showLabelsRef.current && (withinLimit || isSelected)
+      })
 
       nodeStore.forEach((node) => {
         node.label.quaternion.copy(camera.quaternion)
@@ -2002,7 +2030,6 @@ export default function App() {
       <section className="analysisTab liveAnalysis">
         <div className="analysisHeader">
           <div>
-            <p>Capture Source</p>
             <h2>{activeSource === 'live' ? 'Live Capture' : 'PCAP Replay'}</h2>
           </div>
           <div className="sourceSwitch" aria-label="Input source">
@@ -2013,18 +2040,7 @@ export default function App() {
 
         {activeSource === 'live' ? (
           <div className="sourcePanel">
-            <label className="fieldLabel" htmlFor="capture-interface">Interface</label>
-            <input id="capture-interface" value={captureInterface} onChange={(event) => setCaptureInterface(event.target.value)} placeholder="en0, eth0, wlan0" />
-            <div className="exampleChips" aria-label="Interface examples">
-              {['en0', 'eth0', 'wlan0'].map((iface) => (
-                <button type="button" key={iface} onClick={() => setCaptureInterface(iface)}>{iface}</button>
-              ))}
-            </div>
-            <dl className="liveStatus">
-              <div><dt>WebSocket</dt><dd>{status}</dd></div>
-              <div><dt>Packets</dt><dd>{livePackets.length.toLocaleString()}</dd></div>
-              <div><dt>Filtered</dt><dd>{filteredPackets.length.toLocaleString()}</dd></div>
-            </dl>
+
             {captureMessage && <p className="permissionError">{captureMessage}</p>}
             <button className="primaryAction" type="button" onClick={requestCapture}>
               {needsCapturePermission ? 'Start live capture' : 'Restart live view'}
@@ -2172,7 +2188,7 @@ export default function App() {
               />
             )}
 
-            {analysisContent[activeTab]?.()}
+            {activeTab !== 'live' && analysisContent[activeTab]?.()}
 
             <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls">
               {!showLiveWorkspaceControls && (
