@@ -24,3 +24,6 @@ __pycache__/
 # local app artifacts
 *.app/
 .gitnexus
+.claude/
+AGENTS.md
+CLAUDE.md
