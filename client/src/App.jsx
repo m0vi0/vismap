@@ -7,10 +7,12 @@ const WS_URL = 'ws://127.0.0.1:8765'
 const MAX_PACKET_PARTICLES = 420
 const NODE_LIMIT = 18
 const LIVE_PACKET_HISTORY_LIMIT = 2000
-const LIVE_PACKET_UI_FLUSH_MS = 250
+const LIVE_PACKET_UI_FLUSH_MS = 1000
 const ANALYSIS_PACKET_WINDOW = 2000
-const TABLE_ROW_LIMIT = 120
-const LARGE_TABLE_ROW_LIMIT = 200
+const TABLE_ROW_LIMIT = 80
+const LARGE_TABLE_ROW_LIMIT = 80
+const ANALYSIS_SNAPSHOT_MS = 1000
+const LIVE_GRAPH_REBUILD_MS = 350
 const TARGET_PIXEL_TOLERANCE = 42
 const REPLAY_TICK_MS = 80
 const MIN_CAMERA_ZOOM = 0.55
@@ -37,6 +39,8 @@ const TABS = {
   protocols: 'Protocol Hierarchy',
   io: 'I/O Graphs',
 }
+
+const ANALYSIS_TABS = new Set(['stats', 'conversations', 'endpoints', 'protocols', 'io'])
 
 const LINKTYPE_NAMES = {
   0: 'BSD loopback',
@@ -575,6 +579,119 @@ function isPrivateIpv4(ip) {
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
 }
 
+function createEmptyAnalysis() {
+  return {
+    conversations: [],
+    endpoints: [],
+    protocols: [],
+    hostnames: new Map(),
+    macNames: new Map(),
+    timelineBuckets: Array.from({ length: 40 }, () => 0),
+    maxBucket: 1,
+    totalBytes: 0,
+    throughput: 0,
+  }
+}
+
+function buildTrafficAnalysis(packets, replayMeta, conversationSort = 'bytes') {
+  const conversations = new Map()
+  const endpoints = new Map()
+  const protocols = new Map()
+  const hostnames = new Map()
+  const macNames = new Map()
+  const timelineBuckets = Array.from({ length: 40 }, () => 0)
+  const duration = Math.max(replayMeta?.duration || 0, 0.1)
+  let totalBytes = 0
+  let latestTimestamp = 0
+
+  packets.forEach((packet) => {
+    const size = Number(packet.size) || 0
+    const proto = packet.proto || 'OTHER'
+    const src = packet.src || packet.srcIp
+    const dst = packet.dst || packet.dstIp
+    const timestamp = Number(packet.timestamp) || 0
+    const packetTime = Number.isFinite(Number(packet.replayTime)) ? Number(packet.replayTime) : timestamp
+    if (!src || !dst) return
+
+    totalBytes += size
+    latestTimestamp = Math.max(latestTimestamp, timestamp)
+
+    Object.entries(packet.resolvedNames || {}).forEach(([ip, name]) => {
+      if (name) hostnames.set(ip, name)
+    })
+    if (packet.srcMac && packet.srcIp) macNames.set(packet.srcMac, packet.srcIp)
+    if (packet.dstMac && packet.dstIp) macNames.set(packet.dstMac, packet.dstIp)
+
+    const endpointsKey = [src, dst].sort().join('<>')
+    const convoKey = `${endpointsKey}<${proto}>`
+    const conversation = conversations.get(convoKey) || {
+      key: convoKey,
+      src,
+      dst,
+      proto,
+      bytes: 0,
+      packets: 0,
+      first: packetTime,
+      last: packetTime,
+    }
+    conversation.bytes += size
+    conversation.packets += 1
+    conversation.first = Math.min(conversation.first, packetTime)
+    conversation.last = Math.max(conversation.last, packetTime)
+    conversations.set(convoKey, conversation)
+
+    ;[src, dst].forEach((ip) => {
+      const endpoint = endpoints.get(ip) || { ip, bytes: 0, packets: 0, protocols: new Set(), mac: '' }
+      endpoint.bytes += size
+      endpoint.packets += 1
+      endpoint.protocols.add(proto)
+      if (ip === packet.srcIp && packet.srcMac) endpoint.mac = packet.srcMac
+      if (ip === packet.dstIp && packet.dstMac) endpoint.mac = packet.dstMac
+      endpoints.set(ip, endpoint)
+    })
+
+    const protocol = protocols.get(proto) || { proto, bytes: 0, packets: 0 }
+    protocol.bytes += size
+    protocol.packets += 1
+    protocols.set(proto, protocol)
+
+    const bucket = Math.min(timelineBuckets.length - 1, Math.floor((packetTime / duration) * timelineBuckets.length))
+    timelineBuckets[bucket] += size
+  })
+
+  const sortedConversations = [...conversations.values()].map((conversation) => ({
+    ...conversation,
+    duration: Math.max(0.001, conversation.last - conversation.first),
+    rate: conversation.bytes / Math.max(0.001, conversation.last - conversation.first),
+  }))
+  sortedConversations.sort((a, b) => {
+    if (conversationSort === 'packets') return b.packets - a.packets
+    if (conversationSort === 'rate') return b.rate - a.rate
+    if (conversationSort === 'recent') return b.last - a.last
+    return b.bytes - a.bytes
+  })
+
+  const throughput = latestTimestamp
+    ? packets
+      .filter((packet) => latestTimestamp - (Number(packet.timestamp) || 0) <= 5)
+      .reduce((total, packet) => total + (Number(packet.size) || 0), 0) / 5
+    : 0
+
+  return {
+    conversations: sortedConversations,
+    endpoints: [...endpoints.values()]
+      .map((endpoint) => ({ ...endpoint, protocols: [...endpoint.protocols].join(', ') }))
+      .sort((a, b) => b.bytes - a.bytes),
+    protocols: [...protocols.values()].sort((a, b) => b.bytes - a.bytes),
+    hostnames,
+    macNames,
+    timelineBuckets,
+    maxBucket: Math.max(...timelineBuckets, 1),
+    totalBytes,
+    throughput,
+  }
+}
+
 function makeTextSprite(text) {
   const canvas = document.createElement('canvas')
   canvas.width = 768
@@ -733,8 +850,6 @@ export default function App() {
   const [cameraZoom, setCameraZoom] = useState(DEFAULT_CAMERA_ZOOM)
   const [showLabels, setShowLabels] = useState(true)
   const [labelMode, setLabelMode] = useState('resolvedIp')
-  const [, setNodes] = useState([])
-  const [, setEdges] = useState([])
   const [status, setStatus] = useState('connecting')
   const [captureMessage, setCaptureMessage] = useState('')
   const [captureInterface, setCaptureInterface] = useState('en0')
@@ -751,6 +866,9 @@ export default function App() {
   const [replayTime, setReplayTime] = useState(0)
   const [replaySpeed, setReplaySpeed] = useState(1)
   const [replayError, setReplayError] = useState('')
+  const [analysisSnapshot, setAnalysisSnapshot] = useState(() => createEmptyAnalysis())
+  const analysisSnapshotTimerRef = useRef(null)
+  const graphRebuildTimerRef = useRef(null)
 
   const sourcePackets = useMemo(() => {
     if (activeSource === 'replay') return replayPackets.slice(Math.max(0, replayIndex - ANALYSIS_PACKET_WINDOW), replayIndex)
@@ -762,96 +880,14 @@ export default function App() {
     [activeFilter, sourcePackets],
   )
 
+  const analysisActive = ANALYSIS_TABS.has(activeTab)
+
   const selectedPacket = useMemo(
-    () => filteredPackets.find((packet) => packet.id === selectedPacketId) || null,
-    [filteredPackets, selectedPacketId],
+    () => analysisActive ? filteredPackets.find((packet) => packet.id === selectedPacketId) || null : null,
+    [analysisActive, filteredPackets, selectedPacketId],
   )
 
-  const trafficAnalysis = useMemo(() => {
-    const conversations = new Map()
-    const endpoints = new Map()
-    const protocols = new Map()
-    const hostnames = new Map()
-    const macNames = new Map()
-    const timelineBuckets = Array.from({ length: 40 }, () => 0)
-    const duration = Math.max(replayMeta?.duration || 0, 0.1)
-
-    filteredPackets.forEach((packet) => {
-      const size = Number(packet.size) || 0
-      const proto = packet.proto || 'OTHER'
-      const src = packet.src || packet.srcIp
-      const dst = packet.dst || packet.dstIp
-      if (!src || !dst) return
-
-      Object.entries(packet.resolvedNames || {}).forEach(([ip, name]) => {
-        if (name) hostnames.set(ip, name)
-      })
-      if (packet.srcMac && packet.srcIp) macNames.set(packet.srcMac, packet.srcIp)
-      if (packet.dstMac && packet.dstIp) macNames.set(packet.dstMac, packet.dstIp)
-
-      const endpointsKey = [src, dst].sort().join('<>')
-      const convoKey = `${endpointsKey}<${proto}>`
-      const conversation = conversations.get(convoKey) || {
-        key: convoKey,
-        src,
-        dst,
-        proto,
-        bytes: 0,
-        packets: 0,
-        first: packet.replayTime,
-        last: packet.replayTime,
-      }
-      conversation.bytes += size
-      conversation.packets += 1
-      conversation.first = Math.min(conversation.first, packet.replayTime)
-      conversation.last = Math.max(conversation.last, packet.replayTime)
-      conversations.set(convoKey, conversation)
-
-        ;[src, dst].forEach((ip) => {
-          const endpoint = endpoints.get(ip) || { ip, bytes: 0, packets: 0, protocols: new Set(), mac: '' }
-          endpoint.bytes += size
-          endpoint.packets += 1
-          endpoint.protocols.add(proto)
-          if (ip === packet.srcIp && packet.srcMac) endpoint.mac = packet.srcMac
-          if (ip === packet.dstIp && packet.dstMac) endpoint.mac = packet.dstMac
-          endpoints.set(ip, endpoint)
-        })
-
-      const protocol = protocols.get(proto) || { proto, bytes: 0, packets: 0 }
-      protocol.bytes += size
-      protocol.packets += 1
-      protocols.set(proto, protocol)
-
-      const bucket = Math.min(timelineBuckets.length - 1, Math.floor((packet.replayTime / duration) * timelineBuckets.length))
-      timelineBuckets[bucket] += size
-    })
-
-    const sortedConversations = [...conversations.values()].map((conversation) => ({
-      ...conversation,
-      duration: Math.max(0.001, conversation.last - conversation.first),
-      rate: conversation.bytes / Math.max(0.001, conversation.last - conversation.first),
-    }))
-    sortedConversations.sort((a, b) => {
-      if (conversationSort === 'packets') return b.packets - a.packets
-      if (conversationSort === 'rate') return b.rate - a.rate
-      if (conversationSort === 'recent') return b.last - a.last
-      return b.bytes - a.bytes
-    })
-
-    return {
-      conversations: sortedConversations,
-      endpoints: [...endpoints.values()]
-        .map((endpoint) => ({ ...endpoint, protocols: [...endpoint.protocols].join(', ') }))
-        .sort((a, b) => b.bytes - a.bytes),
-      protocols: [...protocols.values()].sort((a, b) => b.bytes - a.bytes),
-      hostnames,
-      macNames,
-      timelineBuckets,
-      maxBucket: Math.max(...timelineBuckets, 1),
-    }
-  }, [conversationSort, filteredPackets, replayMeta])
-
-  const replayAnalysis = trafficAnalysis
+  const trafficAnalysis = analysisSnapshot
   const replayGraphBucket = activeSource === 'replay' ? Math.floor(replayTime * 8) : 0
 
   useEffect(() => {
@@ -879,6 +915,25 @@ export default function App() {
   }, [filteredPackets])
 
   useEffect(() => {
+    if (!analysisActive) {
+      if (analysisSnapshotTimerRef.current !== null) {
+        window.clearTimeout(analysisSnapshotTimerRef.current)
+        analysisSnapshotTimerRef.current = null
+      }
+      return undefined
+    }
+
+    if (analysisSnapshotTimerRef.current !== null) return undefined
+
+    analysisSnapshotTimerRef.current = window.setTimeout(() => {
+      analysisSnapshotTimerRef.current = null
+      setAnalysisSnapshot(buildTrafficAnalysis(filteredPacketsRef.current, replayMeta, conversationSort))
+    }, ANALYSIS_SNAPSHOT_MS)
+
+    return undefined
+  }, [analysisActive, conversationSort, filteredPackets, replayMeta])
+
+  useEffect(() => {
     showLabelsRef.current = showLabels
   }, [showLabels])
 
@@ -888,9 +943,9 @@ export default function App() {
   }, [labelMode])
 
   useEffect(() => {
-    hostnamesRef.current = replayAnalysis.hostnames
-    macNamesRef.current = replayAnalysis.macNames
-  }, [replayAnalysis.hostnames, replayAnalysis.macNames])
+    hostnamesRef.current = trafficAnalysis.hostnames
+    macNamesRef.current = trafficAnalysis.macNames
+  }, [trafficAnalysis.hostnames, trafficAnalysis.macNames])
 
   useEffect(() => {
     if (!cameraRef.current) return
@@ -990,34 +1045,7 @@ export default function App() {
     }
 
     function snapshotState() {
-      const connectedIps = new Set()
-      edgeStore.forEach((edge) => {
-        connectedIps.add(edge.src)
-        connectedIps.add(edge.dst)
-      })
-
-      const nextNodes = [...nodeStore.values()]
-        .filter((node) => connectedIps.has(node.ip))
-        .map((node) => ({
-          ip: node.ip,
-          bytes: node.bytes,
-          packets: node.packets,
-          rate: node.recentBytes,
-        }))
-        .sort((a, b) => b.bytes - a.bytes)
-
-      const nextEdges = [...edgeStore.values()]
-        .map((edge) => ({
-          key: edge.key,
-          src: edge.src,
-          dst: edge.dst,
-          bytes: edge.bytes,
-          packets: edge.packets,
-        }))
-        .sort((a, b) => b.bytes - a.bytes)
-
-      setNodes(nextNodes)
-      setEdges(nextEdges)
+      // Keep this hook available for summary packets without forcing React renders on the graph hot path.
     }
 
     function rebuildGraph(packets) {
@@ -1071,8 +1099,6 @@ export default function App() {
       orbitStateRef.current.recenterPan = false
       layoutSpreadRef.current.value = 1
       layoutSpreadRef.current.target = 1
-      setNodes([])
-      setEdges([])
     }
 
     function ensureNode(ip) {
@@ -1480,7 +1506,6 @@ export default function App() {
         node.label.quaternion.copy(camera.quaternion)
       })
 
-      if (Math.random() < 0.03) snapshotState()
       renderer.render(scene, camera)
     }
 
@@ -1582,11 +1607,10 @@ export default function App() {
       setStatus('offline')
     })
 
-    const summaryTimer = window.setInterval(snapshotState, 900)
-
     return () => {
-      window.clearInterval(summaryTimer)
       if (livePacketFlushRef.current !== null) window.clearTimeout(livePacketFlushRef.current)
+      if (analysisSnapshotTimerRef.current !== null) window.clearTimeout(analysisSnapshotTimerRef.current)
+      if (graphRebuildTimerRef.current !== null) window.clearTimeout(graphRebuildTimerRef.current)
       ws.close()
       cancelAnimationFrame(frameRef.current)
       window.removeEventListener('resize', handleResize)
@@ -1774,14 +1798,24 @@ export default function App() {
 
   useEffect(() => {
     if (!rebuildGraphRef.current) return
-    rebuildGraphRef.current(filteredPacketsRef.current)
+    if (activeSource === 'replay') {
+      rebuildGraphRef.current(filteredPacketsRef.current)
+      return
+    }
+
+    if (graphRebuildTimerRef.current !== null) return
+    graphRebuildTimerRef.current = window.setTimeout(() => {
+      graphRebuildTimerRef.current = null
+      rebuildGraphRef.current?.(filteredPacketsRef.current)
+    }, LIVE_GRAPH_REBUILD_MS)
   }, [activeFilter, activeSource, replayGraphBucket])
 
   useEffect(() => {
+    if (!analysisActive) return
     if (selectedPacketId && !filteredPackets.some((packet) => packet.id === selectedPacketId)) {
       setSelectedPacketId(null)
     }
-  }, [filteredPackets, selectedPacketId])
+  }, [analysisActive, filteredPackets, selectedPacketId])
 
   function requestCapture() {
     setActiveTab('live')
@@ -1834,7 +1868,11 @@ export default function App() {
 
     try {
       const parsed = parseCaptureBuffer(await file.arrayBuffer())
-      setReplayPackets(parsed.packets.map((packet, index) => normalizePacket(packet, 'replay', index)))
+      const normalizedReplayPackets = parsed.packets.map((packet, index) => normalizePacket(packet, 'replay', index))
+      setReplayPackets(normalizedReplayPackets)
+      setAnalysisSnapshot(buildTrafficAnalysis(normalizedReplayPackets.slice(0, ANALYSIS_PACKET_WINDOW), {
+        duration: parsed.duration,
+      }, conversationSort))
       setReplayMeta({
         name: file.name,
         format: parsed.format,
@@ -1914,15 +1952,8 @@ export default function App() {
   }, [appMode, replayMeta, replayPackets, replaySpeed, replayState])
 
   const needsCapturePermission = status === 'ready' || status === 'capture_error'
-  const currentThroughput = useMemo(() => {
-    if (!filteredPackets.length) return 0
-    const latest = Math.max(...filteredPackets.map((packet) => Number(packet.timestamp) || 0))
-    return filteredPackets
-      .filter((packet) => latest - (Number(packet.timestamp) || 0) <= 5)
-      .reduce((total, packet) => total + (Number(packet.size) || 0), 0) / 5
-  }, [filteredPackets])
-
-  const packetRows = filteredPackets.slice(-TABLE_ROW_LIMIT).reverse()
+  const currentThroughput = trafficAnalysis.throughput
+  const packetRows = analysisActive ? filteredPackets.slice(-TABLE_ROW_LIMIT).reverse() : []
   const protocolTotalBytes = Math.max(
     trafficAnalysis.protocols.reduce((total, protocol) => total + protocol.bytes, 0),
     1,
@@ -1949,7 +1980,7 @@ export default function App() {
   const showLiveWorkspaceControls = activeTab === 'live'
 
   const analysisContent = {
-    live: (
+    live: () => (
       <section className="analysisTab liveAnalysis">
         <div className="analysisHeader">
           <div>
@@ -2011,7 +2042,7 @@ export default function App() {
         )}
       </section>
     ),
-    stats: (
+    stats: () => (
       <section className="analysisTab">
         <div className="analysisHeader"><p>Whole Network</p><h2>Filtered network summary</h2></div>
         <div className="metricGrid">
@@ -2026,25 +2057,25 @@ export default function App() {
         </div>
       </section>
     ),
-    conversations: (
+    conversations: () => (
       <section className="analysisTab">
         <div className="analysisHeader"><p>Conversations</p><h2>Communication pairs</h2></div>
         <div className="dataTable sixCol">{['Source', 'Destination', 'Protocol', 'Packets', 'Bytes', 'Rate'].map((heading) => <strong key={heading}>{heading}</strong>)}{trafficAnalysis.conversations.slice(0, LARGE_TABLE_ROW_LIMIT).map((conversation) => <button className={conversation.key === selectedConversationKey ? 'selected tableRow' : 'tableRow'} key={conversation.key} type="button" onClick={() => { setSelectedConversationKey(conversation.key); setSelectedIp(conversation.src); pointTargetRef.current = { active: true, ip: conversation.src, x: 0, y: 0 } }}><span>{conversation.src}</span><span>{conversation.dst}</span><span>{conversation.proto}</span><span>{conversation.packets.toLocaleString()}</span><span>{byteLabel(conversation.bytes)}</span><span>{byteLabel(conversation.rate)}/s</span></button>)}</div>
       </section>
     ),
-    endpoints: (
+    endpoints: () => (
       <section className="analysisTab">
         <div className="analysisHeader"><p>Endpoints</p><h2>Hosts and devices</h2></div>
         <div className="dataTable sixCol">{['Endpoint', 'MAC', 'Packets', 'Bytes', 'Inbound', 'Protocols'].map((heading) => <strong key={heading}>{heading}</strong>)}{trafficAnalysis.endpoints.slice(0, LARGE_TABLE_ROW_LIMIT).map((endpoint) => <button className={endpoint.ip === selectedIp ? 'selected tableRow' : 'tableRow'} key={endpoint.ip} type="button" onClick={() => setSelectedIp(endpoint.ip)}><span>{endpoint.ip}</span><span>{endpoint.mac || '-'}</span><span>{endpoint.packets.toLocaleString()}</span><span>{byteLabel(endpoint.bytes)}</span><span>{byteLabel(endpoint.bytes)}</span><span>{endpoint.protocols || '-'}</span></button>)}</div>
       </section>
     ),
-    protocols: (
+    protocols: () => (
       <section className="analysisTab">
         <div className="analysisHeader"><p>Protocol Hierarchy</p><h2>Observed protocol breakdown</h2></div>
         <div className="protocolTree">{trafficAnalysis.protocols.map((protocol) => <button className={selectedProtocol === protocol.proto ? 'selected protocolNode' : 'protocolNode'} key={protocol.proto} type="button" onClick={() => { setSelectedProtocol(protocol.proto); setFilterInput(protocol.proto.toLowerCase()); setActiveFilter(parseDisplayFilter(protocol.proto.toLowerCase())) }}><span><i style={{ background: PROTOCOLS[protocol.proto]?.css || PROTOCOLS.OTHER.css }} />Frame / {protocol.proto}</span><strong>{protocol.packets.toLocaleString()} pkts · {byteLabel(protocol.bytes)} · {Math.round((protocol.bytes / protocolTotalBytes) * 100)}%</strong></button>)}</div>
       </section>
     ),
-    io: (
+    io: () => (
       <section className="analysisTab">
         <div className="analysisHeader"><p>I/O Graphs</p><h2>Traffic over time</h2></div>
         <div className="wideTimeline">{trafficAnalysis.timelineBuckets.map((bytes, index) => <i key={`${index}-${bytes}`} style={{ height: `${Math.max(4, (bytes / trafficAnalysis.maxBucket) * 180)}px` }} title={byteLabel(bytes)} />)}</div>
@@ -2123,7 +2154,7 @@ export default function App() {
             />
           )}
 
-          {analysisContent[activeTab]}
+          {analysisContent[activeTab]?.()}
 
           <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls">
             {!showLiveWorkspaceControls && (
@@ -2161,6 +2192,7 @@ export default function App() {
               Whole network
             </button>
           )}
+          {analysisActive && (
           <section className="packetInspector" aria-label="Packet inspection">
             <div className="inspectorPane packetList">
               <h3>Packet List</h3>
@@ -2197,6 +2229,7 @@ export default function App() {
               <pre>{packetBytesText}</pre>
             </div>
           </section>
+          )}
 
           </section>
         </div>
