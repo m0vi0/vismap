@@ -7,7 +7,7 @@ cd "$ROOT/client"
 if [ ! -d node_modules ]; then
   npm install
 fi
-npm run dev -- --host 127.0.0.1 &
+npm run dev &
 VITE_PID=$!
 
 cd "$ROOT"
@@ -21,4 +21,4 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$PYTHON_BIN" server.py --app-url http://127.0.0.1:5173 "$@"
+"$PYTHON_BIN" server.py --app-url http://127.0.0.1:5176 "$@"

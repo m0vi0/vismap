@@ -14,7 +14,7 @@
   --color-secondary-foreground: hsl(var(--secondary-foreground));
   --color-muted: hsl(var(--muted));
   --color-muted-foreground: hsl(var(--muted-foreground));
-  --color-accent: hsl(var(--accent));
+  --color-accent: oklch(0.32 0.02 240);
   --color-accent-foreground: hsl(var(--accent-foreground));
   --color-destructive: hsl(var(--destructive));
   --color-destructive-foreground: hsl(var(--destructive-foreground));
@@ -25,20 +25,25 @@
 
 :root {
   --bg: #04040a;
-  --surface: #08080f;
-  --surface2: #0d0d18;
-  --border: rgba(99, 102, 241, 0.12);
-  --border-bright: rgba(99, 102, 241, 0.35);
-  --text: #c8c8e0;
-  --text-dim: rgba(200, 200, 224, 0.45);
-  --text-dimmer: rgba(200, 200, 224, 0.25);
+  --surface: rgba(255, 255, 255, 0.04);
+  --surface2: rgba(255, 255, 255, 0.07);
+  --border: rgba(255, 255, 255, 0.1);
+  --border-bright: rgba(255, 255, 255, 0.22);
+  --text: rgba(255, 255, 255, 0.88);
+  --text-dim: rgba(255, 255, 255, 0.45);
+  --text-dimmer: rgba(255, 255, 255, 0.25);
   --accent: #818cf8;
-  --accent-dim: rgba(129, 140, 248, 0.15);
-  --accent-glow: rgba(129, 140, 248, 0.08);
+  --accent-dim: rgba(255, 255, 255, 0.08);
+  --accent-glow: rgba(255, 255, 255, 0.04);
   --green: #34d399;
   --green-dim: rgba(52, 211, 153, 0.12);
   --red: #f87171;
   --yellow: #fbbf24;
+
+  /* Panel background scale */
+  --panel-bg: rgba(4, 4, 10, 0.92);
+  --panel-bg-dim: rgba(4, 4, 10, 0.85);
+  --panel-bg-deep: rgba(4, 4, 10, 0.96);
 
   --background: 240 10% 3%;
   --foreground: 240 8% 90%;
@@ -52,7 +57,6 @@
   --secondary-foreground: 240 8% 90%;
   --muted: 240 6% 10%;
   --muted-foreground: 240 5% 55%;
-  --accent: 240 6% 12%;
   --accent-foreground: 240 8% 90%;
   --destructive: 0 72% 51%;
   --destructive-foreground: 240 8% 96%;
@@ -89,45 +93,6 @@ button { font: inherit; }
   background: var(--bg);
 }
 
-.asciiHero {
-  position: relative;
-  width: 100%;
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
-  background: #000000;
-}
-
-.asciiHero .asciiHeader { display: none; }
-
-.asciiStars, .asciiNoise {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.asciiStars {
-  z-index: 0;
-  opacity: 0.18;
-  background-image:
-    radial-gradient(1px 1px at 20% 30%, #818cf8, transparent),
-    radial-gradient(1px 1px at 60% 70%, #c8c8e0, transparent),
-    radial-gradient(1px 1px at 50% 50%, #818cf8, transparent),
-    radial-gradient(1px 1px at 80% 10%, #c8c8e0, transparent),
-    radial-gradient(1px 1px at 90% 60%, #818cf8, transparent),
-    radial-gradient(1px 1px at 33% 80%, #c8c8e0, transparent),
-    radial-gradient(1px 1px at 15% 60%, #818cf8, transparent),
-    radial-gradient(1px 1px at 70% 40%, #c8c8e0, transparent);
-  background-size: 200% 200%, 180% 180%, 250% 250%, 220% 220%, 190% 190%, 240% 240%, 210% 210%, 230% 230%;
-}
-
-.asciiNoise {
-  z-index: 1;
-  opacity: 0.04;
-  background-image:
-    repeating-linear-gradient(0deg, transparent 0, transparent 2px, rgba(129, 140, 248, 0.3) 3px),
-    repeating-linear-gradient(90deg, transparent 0, transparent 22px, rgba(129, 140, 248, 0.1) 23px);
-}
 
 /* ── Layout ────────────────────────────────────────────── */
 
@@ -141,29 +106,8 @@ button { font: inherit; }
   padding: 0;
 }
 
-.appFrame.menuCollapsed .appMenu {
-  width: 52px;
-}
 
-.appFrame.menuCollapsed .liveViewport .analysisTab {
-  left: 52px;
-}
-
-.appFrame.screensaverActive {
-  grid-template-columns: 0 minmax(0, 1fr);
-}
-
-.appFrame.screensaverActive .appMenu {
-  position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  z-index: 10;
-  width: 200px;
-  visibility: hidden;
-}
-
-/* ── Sidebar ───────────────────────────────────────────── */
+/* ── Sidebar (removed) ─────────────────────────────────── */
 
 .appMenu {
   position: absolute;
@@ -177,9 +121,10 @@ button { font: inherit; }
   flex-direction: column;
   gap: 0;
   overflow: hidden;
-  border-right: 1px solid var(--border);
-  background: var(--surface);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(4, 4, 10, 0.90);
   padding: 0;
+  backdrop-filter: blur(24px);
 }
 
 .appMenuBrand {
@@ -199,113 +144,71 @@ button { font: inherit; }
 }
 
 .appMenuBrand strong {
-  color: var(--text);
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.78rem;
+  font-size: 0.88rem;
   font-weight: 600;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.2em;
   text-transform: uppercase;
+  background: linear-gradient(to right, #fff, rgba(255, 255, 255, 0.6));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .appMenuBrand span {
-  overflow: hidden;
-  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.5);
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.62rem;
+  font-size: 0.58rem;
   font-weight: 400;
   letter-spacing: 0.06em;
-  text-overflow: ellipsis;
+  padding: 2px 8px;
   text-transform: uppercase;
   white-space: nowrap;
 }
 
-.menuCollapseButton {
-  display: inline-flex;
-  width: 26px;
-  height: 26px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.7rem;
-  transition: border-color 0.15s, color 0.15s;
-}
-
-.menuCollapseButton:hover { border-color: var(--border-bright); color: var(--text); }
-
 .appMenuItems {
-  display: grid;
-  gap: 2px;
-  overflow-y: auto;
-  padding: 10px 8px;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px;
   flex: 1;
 }
 
-.appMenuItem {
-  display: flex;
-  min-height: 34px;
+.appMenuPill {
+  display: inline-flex;
   align-items: center;
-  gap: 9px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.20);
+  background: rgba(255, 255, 255, 0.08);
   color: var(--text-dim);
-  cursor: pointer;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.68rem;
-  font-weight: 400;
-  letter-spacing: 0.04em;
-  padding: 0 10px;
-  text-align: left;
-  transition: background 0.12s, color 0.12s, border-color 0.12s;
-}
-
-.appMenuShort {
-  display: none;
-  width: 28px;
-  flex: 0 0 auto;
-  text-align: center;
-}
-
-.appMenuFull {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   white-space: nowrap;
+  width: fit-content;
 }
 
-.appMenuItem.active {
-  border-color: var(--border-bright);
-  background: var(--accent-dim);
-  color: var(--accent);
+.liveDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+  animation: livePulse 2s ease-in-out infinite;
 }
 
-.appMenuItem:hover:not(.active) {
-  background: rgba(129, 140, 248, 0.06);
-  color: var(--text);
-}
-
-.appMenuItem:focus-visible { outline: none; border-color: var(--border-bright); }
-
-/* Collapsed sidebar */
-.menuCollapsed .appMenu { padding: 0; }
-.menuCollapsed .appMenuBrand { justify-content: center; padding: 14px 10px; }
-.menuCollapsed .appMenuBrand div { display: none; }
-.menuCollapsed .appMenuItems { padding: 10px 6px; }
-.menuCollapsed .appMenuItem { justify-content: center; padding: 0; }
-.menuCollapsed .appMenuShort { display: block; }
-.menuCollapsed .appMenuFull {
-  position: absolute;
-  inline-size: 1px;
-  block-size: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
-  white-space: nowrap;
+@keyframes livePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 
 /* ── Viewport ──────────────────────────────────────────── */
@@ -331,7 +234,7 @@ button { font: inherit; }
   z-index: 1;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 8px;
   background: transparent;
 }
 
@@ -366,7 +269,7 @@ button { font: inherit; }
   gap: 8px;
   height: 48px;
   border-bottom: 1px solid var(--border);
-  background: rgba(4, 4, 10, 0.92);
+  background: var(--panel-bg);
   padding: 0 16px;
   backdrop-filter: blur(20px);
 }
@@ -384,8 +287,8 @@ button { font: inherit; }
   min-width: 0;
   height: 30px;
   border: 1px solid var(--border);
-  border-radius: 3px;
-  background: rgba(129, 140, 248, 0.04);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text);
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.75rem;
@@ -394,14 +297,14 @@ button { font: inherit; }
 }
 
 .trafficFilterBar input:focus-visible {
-  border-color: var(--accent);
+  border-color: rgba(255, 255, 255, 0.4);
   outline: none;
 }
 
 .trafficFilterBar button {
   height: 30px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -417,6 +320,46 @@ button { font: inherit; }
 .trafficFilterBar button:hover { border-color: var(--border-bright); color: var(--text); }
 .trafficFilterBar .filterError { grid-column: 2 / -1; margin: 0; }
 
+.filterInputWrap {
+  position: relative;
+  min-width: 0;
+}
+
+.filterInputWrap input {
+  width: 100%;
+}
+
+.filterSuggestions {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin: 4px 0 0;
+  padding: 4px 0;
+  list-style: none;
+  background: var(--panel-bg-deep);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  z-index: 200;
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+
+.filterSuggestions li {
+  padding: 6px 12px;
+  font-size: 12px;
+  font-family: 'IBM Plex Mono', monospace;
+  color: rgba(255,255,255,0.75);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.filterSuggestions li:hover,
+.filterSuggestions li.active {
+  background: rgba(255,255,255,0.07);
+  color: #fff;
+}
+
 /* ── Graph toolbar ─────────────────────────────────────── */
 
 .graphToolbar {
@@ -431,8 +374,8 @@ button { font: inherit; }
 
 .liveGraphToolbar {
   top: 56px;
-  right: auto;
-  left: 14px;
+  right: 14px;
+  left: auto;
   max-width: none;
 }
 
@@ -441,8 +384,8 @@ button { font: inherit; }
 .graphToolbar span {
   height: 30px;
   border: 1px solid var(--border);
-  border-radius: 3px;
-  background: rgba(4, 4, 10, 0.85);
+  border-radius: 6px;
+  background: var(--panel-bg-dim);
   color: var(--text-dim);
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.65rem;
@@ -482,7 +425,7 @@ button { font: inherit; }
   max-height: none;
   overflow: auto;
   border-right: 1px solid var(--border);
-  background: rgba(4, 4, 10, 0.94);
+  background: var(--panel-bg);
   color: var(--text);
   padding: 16px;
   backdrop-filter: blur(20px);
@@ -490,10 +433,11 @@ button { font: inherit; }
 }
 
 .liveViewport .analysisTab {
-  top: 48px;
-  bottom: 0;
-  left: 200px;
-  width: 380px;
+  top: 56px;
+  bottom: auto;
+  left: 0;
+  width: auto;
+  overflow: visible;
 }
 
 .analysisHeader {
@@ -509,7 +453,7 @@ button { font: inherit; }
 .analysisHeader p, .analysisHeader h2, .analysisTab h3 { margin: 0; }
 
 .analysisHeader p {
-  color: var(--accent);
+  color: var(--text-dimmer);
   font-size: 0.6rem;
   font-weight: 500;
   letter-spacing: 0.12em;
@@ -518,10 +462,13 @@ button { font: inherit; }
 
 .analysisHeader h2 {
   margin-top: 4px;
-  color: var(--text);
-  font-size: 0.88rem;
-  font-weight: 400;
+  font-size: 1rem;
+  font-weight: 600;
   letter-spacing: 0;
+  background: linear-gradient(to right, #fff, rgba(255, 255, 255, 0.6));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }
 
 .sourceSwitch, .filterBar, .metricGrid, .analysisSplit { display: grid; gap: 6px; }
@@ -538,7 +485,7 @@ button { font: inherit; }
 .protocolNode {
   height: 30px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -555,7 +502,7 @@ button { font: inherit; }
 .protocolNode.selected {
   border-color: var(--border-bright);
   background: var(--accent-dim);
-  color: var(--accent);
+  color: var(--text);
 }
 
 .filterBar {
@@ -575,7 +522,7 @@ button { font: inherit; }
 .filterBar input {
   height: 30px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -598,7 +545,7 @@ button { font: inherit; }
   width: 100%;
   height: 36px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text);
   font: inherit;
@@ -613,7 +560,7 @@ button { font: inherit; }
 
 .metricGrid div {
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 8px;
   background: var(--accent-glow);
   padding: 10px;
 }
@@ -675,7 +622,7 @@ button { font: inherit; }
 .tableRow span {
   overflow: hidden;
   min-height: 28px;
-  border-bottom: 1px solid rgba(129, 140, 248, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   color: var(--text-dim);
   font-size: 0.68rem;
   padding: 6px 6px;
@@ -733,8 +680,8 @@ button { font: inherit; }
   min-width: 0;
   overflow: auto;
   border: 1px solid var(--border);
-  border-radius: 3px;
-  background: rgba(4, 4, 10, 0.92);
+  border-radius: 8px;
+  background: var(--panel-bg);
   padding: 10px;
   backdrop-filter: blur(16px);
 }
@@ -752,7 +699,7 @@ button { font: inherit; }
   grid-template-columns: 90px minmax(0, 1fr);
   gap: 8px;
   margin: 0;
-  border-bottom: 1px solid rgba(129, 140, 248, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   padding: 5px 0;
   color: var(--text-dim);
   font-size: 0.68rem;
@@ -772,9 +719,9 @@ button { font: inherit; }
   width: 100%;
   height: 38px;
   border: 1px solid var(--border-bright);
-  border-radius: 3px;
+  border-radius: 8px;
   background: var(--accent-dim);
-  color: var(--accent);
+  color: var(--text);
   cursor: pointer;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.72rem;
@@ -784,7 +731,7 @@ button { font: inherit; }
   transition: background 0.15s, border-color 0.15s;
 }
 
-.primaryAction:hover { background: rgba(129, 140, 248, 0.22); border-color: var(--accent); }
+.primaryAction:hover { background: rgba(255, 255, 255, 0.12); border-color: rgba(255, 255, 255, 0.3); }
 
 .playbackControls {
   display: grid;
@@ -796,7 +743,7 @@ button { font: inherit; }
 .playbackControls select {
   height: 34px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -823,8 +770,8 @@ button { font: inherit; }
   min-height: 90px;
   place-items: center;
   gap: 5px;
-  border: 1px dashed rgba(129, 140, 248, 0.25);
-  border-radius: 4px;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
   background: var(--accent-glow);
   color: var(--text-dim);
   cursor: pointer;
@@ -850,7 +797,7 @@ button { font: inherit; }
 
 .replayStats div {
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 8px;
   background: var(--accent-glow);
   padding: 8px;
 }
@@ -867,9 +814,9 @@ button { font: inherit; }
   width: min(400px, calc(100vw - 32px));
   transform: translate(-50%, -50%);
   border: 1px solid var(--border-bright);
-  border-radius: 4px;
-  background: rgba(8, 8, 15, 0.96);
-  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(129, 140, 248, 0.08);
+  border-radius: 16px;
+  background: var(--panel-bg-deep);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.06);
   color: var(--text);
   padding: 22px;
   backdrop-filter: blur(20px);
@@ -877,7 +824,7 @@ button { font: inherit; }
 
 .permissionKicker {
   margin: 0 0 8px;
-  color: var(--accent);
+  color: var(--text-dimmer);
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.62rem;
   font-weight: 500;
@@ -907,9 +854,9 @@ button { font: inherit; }
   height: 40px;
   width: 100%;
   border: 1px solid var(--border-bright);
-  border-radius: 3px;
+  border-radius: 8px;
   background: var(--accent-dim);
-  color: var(--accent);
+  color: var(--text);
   cursor: pointer;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.72rem;
@@ -927,11 +874,11 @@ button { font: inherit; }
   z-index: 3;
   width: 44px;
   height: 44px;
-  border: 1px solid rgba(129, 140, 248, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.5);
   border-radius: 50%;
   pointer-events: none;
   transform: translate(-50%, -50%) scale(var(--reticle-scale));
-  box-shadow: 0 0 16px rgba(129, 140, 248, 0.15);
+  box-shadow: 0 0 16px rgba(255, 255, 255, 0.08);
 }
 
 .pointReticle::after {
@@ -950,8 +897,8 @@ button { font: inherit; }
 .pointReticle.locking::after { opacity: 1; }
 
 .pointReticle.locked {
-  border-color: var(--accent);
-  box-shadow: 0 0 24px rgba(129, 140, 248, 0.3);
+  border-color: rgba(255, 255, 255, 0.8);
+  box-shadow: 0 0 24px rgba(255, 255, 255, 0.18);
 }
 
 /* ── Whole network button ──────────────────────────────── */
@@ -963,9 +910,9 @@ button { font: inherit; }
   z-index: 4;
   height: 34px;
   border: 1px solid var(--border-bright);
-  border-radius: 3px;
+  border-radius: 999px;
   background: var(--accent-dim);
-  color: var(--accent);
+  color: var(--text);
   cursor: pointer;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.65rem;
@@ -976,7 +923,7 @@ button { font: inherit; }
   transition: background 0.15s;
 }
 
-.wholeNetworkButton:hover { background: rgba(129, 140, 248, 0.22); }
+.wholeNetworkButton:hover { background: rgba(255, 255, 255, 0.12); }
 
 /* ── Stats drawer ──────────────────────────────────────── */
 
@@ -989,7 +936,7 @@ button { font: inherit; }
   max-height: min(38dvh, 360px);
   overflow: hidden;
   border-top: 1px solid var(--border);
-  background: rgba(4, 4, 10, 0.96);
+  background: var(--panel-bg-deep);
   transform: translateY(calc(100% - 48px));
   transition: transform 180ms ease;
   backdrop-filter: blur(20px);
@@ -1009,7 +956,7 @@ button { font: inherit; }
 
 .statsHeader p {
   margin: 0 0 2px;
-  color: var(--accent);
+  color: var(--text-dimmer);
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.58rem;
   font-weight: 500;
@@ -1027,7 +974,7 @@ button { font: inherit; }
 .statsHeader button {
   height: 28px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -1069,7 +1016,7 @@ button { font: inherit; }
 
 .statsGrid dl div {
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 8px;
   background: var(--accent-glow);
   padding: 8px;
 }
@@ -1083,7 +1030,7 @@ button { font: inherit; }
   align-items: center;
   gap: 8px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text);
   cursor: pointer;
@@ -1120,7 +1067,7 @@ button { font: inherit; }
   max-height: min(34dvh, 320px);
   overflow: hidden;
   border-top: 1px solid var(--border);
-  background: rgba(4, 4, 10, 0.96);
+  background: var(--panel-bg-deep);
   transform: translateY(calc(100% - 48px));
   transition: transform 180ms ease;
   backdrop-filter: blur(20px);
@@ -1139,7 +1086,7 @@ button { font: inherit; }
 }
 
 .rankHeader p {
-  color: var(--accent);
+  color: var(--text-dimmer);
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.58rem;
   font-weight: 500;
@@ -1158,7 +1105,7 @@ button { font: inherit; }
 .rankHeader button, .rankHeader select {
   height: 28px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -1185,7 +1132,7 @@ button { font: inherit; }
   align-items: center;
   gap: 10px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text);
   cursor: pointer;
@@ -1217,8 +1164,8 @@ button { font: inherit; }
 
 .panel {
   border: 1px solid var(--border);
-  border-radius: 4px;
-  background: rgba(8, 8, 15, 0.92);
+  border-radius: 10px;
+  background: var(--panel-bg);
   backdrop-filter: blur(16px);
   padding: 14px;
 }
@@ -1248,7 +1195,7 @@ button { font: inherit; }
 .panelTitle button {
   height: 26px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -1272,7 +1219,7 @@ button { font: inherit; }
   gap: 10px;
   width: 100%;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text);
   cursor: pointer;
@@ -1322,7 +1269,7 @@ dd { margin: 3px 0 0; }
 .focusSummary span {
   flex: 1;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: var(--accent-glow);
   color: var(--text-dim);
   font-family: 'IBM Plex Mono', monospace;
@@ -1338,7 +1285,7 @@ dd { margin: 3px 0 0; }
   width: 100%;
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -1365,8 +1312,8 @@ dd { margin: 3px 0 0; }
   align-items: center;
   gap: 8px;
   border: 1px solid var(--border);
-  border-radius: 3px;
-  background: rgba(4, 4, 10, 0.85);
+  border-radius: 999px;
+  background: var(--panel-bg-dim);
   color: var(--text-dim);
   cursor: pointer;
   font-family: 'IBM Plex Mono', monospace;
@@ -1379,7 +1326,7 @@ dd { margin: 3px 0 0; }
   transition: border-color 0.15s, color 0.15s;
 }
 
-.drawerToggle strong { color: var(--accent); font-size: 0.72rem; }
+.drawerToggle strong { color: var(--text); font-size: 0.72rem; }
 .drawerToggle:hover { border-color: var(--border-bright); color: var(--text); }
 
 .deviceDrawer {
@@ -1407,7 +1354,7 @@ dd { margin: 3px 0 0; }
 
 .accordionBlock {
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 8px;
   overflow: hidden;
 }
 
@@ -1445,7 +1392,7 @@ details[open] .accordionSummary {
   gap: 5px;
   height: 26px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 999px;
   background: transparent;
   color: var(--text-dim);
   font-family: 'IBM Plex Mono', monospace;
@@ -1469,7 +1416,7 @@ details[open] .accordionSummary {
   align-items: center;
   gap: 6px;
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dim);
   cursor: pointer;
@@ -1521,7 +1468,7 @@ h1, h2, p { overflow-wrap: anywhere; }
 
 .liveStatus div {
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 8px;
   background: var(--accent-glow);
   padding: 8px;
 }
@@ -1534,7 +1481,7 @@ h1, h2, p { overflow-wrap: anywhere; }
   .analysisViewport .canvasMount { left: 416px; }
   .liveViewport .analysisTab { width: 340px; }
   .liveViewport .canvasMount { left: 356px; }
-  .liveGraphToolbar { left: 356px; }
+  .liveGraphToolbar { right: 14px; left: auto; }
 }
 
 @media (max-width: 900px) {
@@ -1551,8 +1498,7 @@ h1, h2, p { overflow-wrap: anywhere; }
     padding: 0 10px;
   }
   .appMenuBrand { border-bottom: none; padding: 10px 0; }
-  .appMenuItems { flex-direction: row; overflow-x: auto; padding: 8px 0; }
-  .appMenuItem { flex: 0 0 auto; min-height: 30px; white-space: nowrap; }
+  .appMenuItems { flex-direction: row; padding: 8px 0; }
   .viewport { min-height: 600px; }
   .analysisTab { top: 48px; right: 0; bottom: auto; left: 0; width: auto; max-height: 280px; }
   .canvasMount { top: 348px; right: 0; bottom: 260px; left: 0; border: none; border-radius: 0; }

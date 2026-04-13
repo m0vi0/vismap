@@ -72,5 +72,5 @@ function start() {
   const serverArgs = [...python.args, 'server.py', '--app-url', appUrl, ...args]
 
   spawnChild(python.command, serverArgs)
-  spawnChild('npm', ['run', 'dev', '--', '--host', '127.0.0.1', '--port', '5176'], { cwd: clientDir })
+  spawnChild('npm', ['run', 'dev'], { cwd: clientDir })
 }

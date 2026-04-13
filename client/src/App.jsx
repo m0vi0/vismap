@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import HeroAsciiOne from './components/ui/hero-ascii-one.jsx'
 import './App.css'
 
 const WS_URL = 'ws://127.0.0.1:8765'
@@ -34,14 +33,7 @@ const PROTOCOLS = {
 
 const TABS = {
   live: 'Live Capture',
-  stats: 'Whole Network Stats',
-  conversations: 'Conversations',
-  endpoints: 'Endpoints',
-  protocols: 'Protocol Hierarchy',
-  io: 'I/O Graphs',
 }
-
-const ANALYSIS_TABS = new Set(['stats', 'conversations', 'endpoints', 'protocols', 'io'])
 
 const LINKTYPE_NAMES = {
   0: 'BSD loopback',
@@ -104,6 +96,12 @@ function normalizePacket(packet, source, index) {
     ...packet,
   }
 }
+
+const FILTER_SUGGESTIONS = [
+  'tcp', 'udp', 'dns', 'http', 'arp', 'other',
+  'ip.addr == ', 'ip.src == ', 'ip.dst == ',
+  'tcp.port == ', 'udp.port == ', 'port == ',
+]
 
 function parseDisplayFilter(expression) {
   const raw = expression.trim()
@@ -839,21 +837,19 @@ export default function App() {
   const [screensaverActive, setScreensaverActive] = useState(false)
   const screensaverRef = useRef({ timer: null, spinAngle: 0 })
   const [activeTab, setActiveTab] = useState('live')
-  const [menuCollapsed, setMenuCollapsed] = useState(false)
   const [appMode, setAppMode] = useState('live')
   const [activeSource, setActiveSource] = useState('live')
   const [filterInput, setFilterInput] = useState('')
   const [activeFilter, setActiveFilter] = useState({ raw: '', type: 'all' })
   const [filterError, setFilterError] = useState('')
+  const [filterSuggestions, setFilterSuggestions] = useState([])
+  const [suggestionIndex, setSuggestionIndex] = useState(-1)
   const [cameraZoom, setCameraZoom] = useState(DEFAULT_CAMERA_ZOOM)
   const [showLabels, setShowLabels] = useState(true)
   const [labelMode, setLabelMode] = useState('resolvedIp')
   const [status, setStatus] = useState('connecting')
-  const [captureMessage, setCaptureMessage] = useState('')
   const [captureInterface, setCaptureInterface] = useState('en0')
   const [selectedIp, setSelectedIp] = useState(null)
-  const [selectedConversationKey, setSelectedConversationKey] = useState(null)
-  const [selectedProtocol, setSelectedProtocol] = useState(null)
   const [selectedPacketId, setSelectedPacketId] = useState(null)
   const conversationSort = 'bytes'
   const [replayPackets, setReplayPackets] = useState([])
@@ -878,11 +874,9 @@ export default function App() {
     [activeFilter, sourcePackets],
   )
 
-  const analysisActive = ANALYSIS_TABS.has(activeTab)
-
   const selectedPacket = useMemo(
-    () => analysisActive ? filteredPackets.find((packet) => packet.id === selectedPacketId) || null : null,
-    [analysisActive, filteredPackets, selectedPacketId],
+    () => filteredPackets.find((packet) => packet.id === selectedPacketId) || null,
+    [filteredPackets, selectedPacketId],
   )
 
   const trafficAnalysis = analysisSnapshot
@@ -913,14 +907,6 @@ export default function App() {
   }, [filteredPackets])
 
   useEffect(() => {
-    if (!analysisActive) {
-      if (analysisSnapshotTimerRef.current !== null) {
-        window.clearTimeout(analysisSnapshotTimerRef.current)
-        analysisSnapshotTimerRef.current = null
-      }
-      return undefined
-    }
-
     if (analysisSnapshotTimerRef.current !== null) return undefined
 
     analysisSnapshotTimerRef.current = window.setTimeout(() => {
@@ -929,7 +915,7 @@ export default function App() {
     }, ANALYSIS_SNAPSHOT_MS)
 
     return undefined
-  }, [analysisActive, conversationSort, filteredPackets, replayMeta])
+  }, [conversationSort, filteredPackets, replayMeta])
 
   useEffect(() => {
     showLabelsRef.current = showLabels
@@ -1010,6 +996,8 @@ export default function App() {
       ONE: THREE.TOUCH.ROTATE,
       TWO: THREE.TOUCH.DOLLY_PAN,
     }
+    controls.minPolarAngle = 0
+    controls.maxPolarAngle = Math.PI
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0x161616, 2.9))
     scene.add(new THREE.AmbientLight(0xffffff, 1.55))
@@ -1590,7 +1578,10 @@ export default function App() {
       renderer.render(scene, camera)
     }
 
+    let pointerDownPos = null
+
     function handlePointerDown(event) {
+      pointerDownPos = { x: event.clientX, y: event.clientY }
       if (event.shiftKey) return
       const bounds = renderer.domElement.getBoundingClientRect()
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
@@ -1602,7 +1593,7 @@ export default function App() {
         pointerLockedIpRef.current = hit.object.userData.ip
         pointTargetRef.current = { active: true, ip: hit.object.userData.ip, x: 0, y: 0 }
         setSelectedIp(hit.object.userData.ip)
-        controls.enabled = false
+        if (event.button === 0) controls.enabled = false
       } else {
         controls.enabled = true
       }
@@ -1610,6 +1601,11 @@ export default function App() {
 
     function handlePointerUp(event) {
       controls.enabled = true
+      const moved = pointerDownPos
+        ? Math.hypot(event.clientX - pointerDownPos.x, event.clientY - pointerDownPos.y)
+        : 0
+      pointerDownPos = null
+      if (moved > 5) return
       if (selectedIpRef.current) {
         const bounds = renderer.domElement.getBoundingClientRect()
         pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
@@ -1635,7 +1631,8 @@ export default function App() {
     const ws = new WebSocket(WS_URL)
     websocketRef.current = ws
     ws.addEventListener('open', () => {
-      setStatus('ready')
+      setStatus('starting')
+      ws.send(JSON.stringify({ type: 'start_capture' }))
     })
 
     ws.addEventListener('message', (event) => {
@@ -1660,7 +1657,6 @@ export default function App() {
       if (data.type === 'nodes' && appModeRef.current === 'live') applyNodeSummary(data.nodes || [])
       if (data.type === 'capture_status') {
         if (data.iface && data.iface !== 'default interface') setCaptureInterface(data.iface)
-        setCaptureMessage(data.message || '')
         if (data.status === 'ready') setStatus('ready')
         if (data.status === 'running') setStatus('live')
         if (data.status === 'error') setStatus('capture_error')
@@ -1884,11 +1880,10 @@ export default function App() {
   }, [activeFilter, activeSource, replayGraphBucket])
 
   useEffect(() => {
-    if (!analysisActive) return
     if (selectedPacketId && !filteredPackets.some((packet) => packet.id === selectedPacketId)) {
       setSelectedPacketId(null)
     }
-  }, [analysisActive, filteredPackets, selectedPacketId])
+  }, [filteredPackets, selectedPacketId])
 
   function requestCapture() {
     setActiveTab('live')
@@ -1906,14 +1901,43 @@ export default function App() {
     websocketRef.current.send(JSON.stringify({ type: 'start_capture' }))
   }
 
+  function handleFilterInput(e) {
+    const val = e.target.value
+    setFilterInput(val)
+    const q = val.trim().toLowerCase()
+    setFilterSuggestions(q ? FILTER_SUGGESTIONS.filter(s => s.startsWith(q)) : FILTER_SUGGESTIONS)
+    setSuggestionIndex(-1)
+  }
+
+  function handleFilterFocus() {
+    const q = filterInput.trim().toLowerCase()
+    setFilterSuggestions(q ? FILTER_SUGGESTIONS.filter(s => s.startsWith(q)) : FILTER_SUGGESTIONS)
+  }
+
+  function handleFilterBlur() {
+    setTimeout(() => setFilterSuggestions([]), 150)
+  }
+
+  function handleFilterKeyDown(e) {
+    if (!filterSuggestions.length) return
+    if (e.key === 'ArrowDown') { e.preventDefault(); setSuggestionIndex(i => Math.min(i + 1, filterSuggestions.length - 1)) }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); setSuggestionIndex(i => Math.max(i - 1, 0)) }
+    if (e.key === 'Enter' && suggestionIndex >= 0) { e.preventDefault(); pickSuggestion(filterSuggestions[suggestionIndex]) }
+    if (e.key === 'Escape') setFilterSuggestions([])
+  }
+
+  function pickSuggestion(s) {
+    setFilterInput(s)
+    setFilterSuggestions([])
+    setSuggestionIndex(-1)
+  }
+
   function applyDisplayFilter(event) {
     event.preventDefault()
     try {
       const nextFilter = parseDisplayFilter(filterInput)
       setActiveFilter(nextFilter)
       setFilterError('')
-      setSelectedConversationKey(null)
-      setSelectedProtocol(nextFilter.type === 'protocol' ? nextFilter.value : null)
     } catch (error) {
       setFilterError(error instanceof Error ? error.message : 'Unsupported display filter.')
     }
@@ -1923,7 +1947,6 @@ export default function App() {
     setFilterInput('')
     setActiveFilter({ raw: '', type: 'all' })
     setFilterError('')
-    setSelectedProtocol(null)
   }
 
   async function handleReplayFile(event) {
@@ -2024,9 +2047,7 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [appMode, replayMeta, replayPackets, replaySpeed, replayState])
 
-  const needsCapturePermission = status === 'ready' || status === 'capture_error'
   const currentThroughput = trafficAnalysis.throughput
-  const packetRows = analysisActive ? filteredPackets.slice(-TABLE_ROW_LIMIT).reverse() : []
   const protocolTotalBytes = Math.max(
     trafficAnalysis.protocols.reduce((total, protocol) => total + protocol.bytes, 0),
     1,
@@ -2050,30 +2071,16 @@ export default function App() {
     : 'Select a packet to inspect bytes.'
 
   const reticleScale = THREE.MathUtils.clamp(1 / cameraZoom, 0.72, 1.35)
-  const showLiveWorkspaceControls = activeTab === 'live'
 
   const analysisContent = {
     live: () => (
       <section className="analysisTab liveAnalysis">
-        <div className="analysisHeader">
-          <div>
-            <h2>{activeSource === 'live' ? 'Live Capture' : 'PCAP Replay'}</h2>
-          </div>
-          <div className="sourceSwitch" aria-label="Input source">
-            <button className={activeSource === 'live' ? 'active' : ''} type="button" onClick={() => { setActiveSource('live'); setAppMode('live'); setReplayState('idle') }}>Live</button>
-            <button className={activeSource === 'replay' ? 'active' : ''} type="button" onClick={() => { setActiveSource('replay'); setAppMode('replay') }}>PCAP Replay</button>
-          </div>
+        <div className="sourceSwitch" aria-label="Input source">
+          <button className={activeSource === 'live' ? 'active' : ''} type="button" onClick={() => { setActiveSource('live'); setAppMode('live'); setReplayState('idle') }}>Live</button>
+          <button className={activeSource === 'replay' ? 'active' : ''} type="button" onClick={() => { setActiveSource('replay'); setAppMode('replay') }}>PCAP Replay</button>
         </div>
 
-        {activeSource === 'live' ? (
-          <div className="sourcePanel">
-
-            {captureMessage && <p className="permissionError">{captureMessage}</p>}
-            <button className="primaryAction" type="button" onClick={requestCapture}>
-              {needsCapturePermission ? 'Start live capture' : 'Restart live view'}
-            </button>
-          </div>
-        ) : (
+        {activeSource === 'replay' && (
           <div className="sourcePanel">
             <label className="uploadZone">
               <input type="file" accept=".pcap,.pcapng" onChange={handleReplayFile} />
@@ -2103,98 +2110,45 @@ export default function App() {
         )}
       </section>
     ),
-    stats: () => (
-      <section className="analysisTab">
-        <div className="analysisHeader"><p>Whole Network</p><h2>Filtered network summary</h2></div>
-        <div className="metricGrid">
-          <div><span>Hosts</span><strong>{trafficAnalysis.endpoints.length.toLocaleString()}</strong></div>
-          <div><span>Links</span><strong>{trafficAnalysis.conversations.length.toLocaleString()}</strong></div>
-          <div><span>Total Data</span><strong>{byteLabel(filteredPackets.reduce((total, packet) => total + packet.size, 0))}</strong></div>
-          <div><span>Throughput</span><strong>{byteLabel(currentThroughput)}/s</strong></div>
-        </div>
-        <div className="analysisSplit">
-          <section><h3>Top Talkers</h3>{trafficAnalysis.endpoints.slice(0, 8).map((endpoint) => <button className="dataRow" key={endpoint.ip} type="button" onClick={() => setSelectedIp(endpoint.ip)}><span>{endpoint.ip}</span><strong>{byteLabel(endpoint.bytes)}</strong></button>)}</section>
-          <section><h3>Protocol Distribution</h3>{trafficAnalysis.protocols.map((protocol) => <button className="dataRow" key={protocol.proto} type="button" onClick={() => { setSelectedProtocol(protocol.proto); setFilterInput(protocol.proto.toLowerCase()); setActiveFilter(parseDisplayFilter(protocol.proto.toLowerCase())) }}><span>{protocol.proto}</span><strong>{Math.round((protocol.bytes / protocolTotalBytes) * 100)}%</strong></button>)}</section>
-        </div>
-      </section>
-    ),
-    conversations: () => (
-      <section className="analysisTab">
-        <div className="analysisHeader"><p>Conversations</p><h2>Communication pairs</h2></div>
-        <div className="dataTable sixCol">{['Source', 'Destination', 'Protocol', 'Packets', 'Bytes', 'Rate'].map((heading) => <strong key={heading}>{heading}</strong>)}{trafficAnalysis.conversations.slice(0, LARGE_TABLE_ROW_LIMIT).map((conversation) => <button className={conversation.key === selectedConversationKey ? 'selected tableRow' : 'tableRow'} key={conversation.key} type="button" onClick={() => { setSelectedConversationKey(conversation.key); setSelectedIp(conversation.src); pointTargetRef.current = { active: true, ip: conversation.src, x: 0, y: 0 } }}><span>{conversation.src}</span><span>{conversation.dst}</span><span>{conversation.proto}</span><span>{conversation.packets.toLocaleString()}</span><span>{byteLabel(conversation.bytes)}</span><span>{byteLabel(conversation.rate)}/s</span></button>)}</div>
-      </section>
-    ),
-    endpoints: () => (
-      <section className="analysisTab">
-        <div className="analysisHeader"><p>Endpoints</p><h2>Hosts and devices</h2></div>
-        <div className="dataTable sixCol">{['Endpoint', 'MAC', 'Packets', 'Bytes', 'Inbound', 'Protocols'].map((heading) => <strong key={heading}>{heading}</strong>)}{trafficAnalysis.endpoints.slice(0, LARGE_TABLE_ROW_LIMIT).map((endpoint) => <button className={endpoint.ip === selectedIp ? 'selected tableRow' : 'tableRow'} key={endpoint.ip} type="button" onClick={() => setSelectedIp(endpoint.ip)}><span>{endpoint.ip}</span><span>{endpoint.mac || '-'}</span><span>{endpoint.packets.toLocaleString()}</span><span>{byteLabel(endpoint.bytes)}</span><span>{byteLabel(endpoint.bytes)}</span><span>{endpoint.protocols || '-'}</span></button>)}</div>
-      </section>
-    ),
-    protocols: () => (
-      <section className="analysisTab">
-        <div className="analysisHeader"><p>Protocol Hierarchy</p><h2>Observed protocol breakdown</h2></div>
-        <div className="protocolTree">{trafficAnalysis.protocols.map((protocol) => <button className={selectedProtocol === protocol.proto ? 'selected protocolNode' : 'protocolNode'} key={protocol.proto} type="button" onClick={() => { setSelectedProtocol(protocol.proto); setFilterInput(protocol.proto.toLowerCase()); setActiveFilter(parseDisplayFilter(protocol.proto.toLowerCase())) }}><span><i style={{ background: PROTOCOLS[protocol.proto]?.css || PROTOCOLS.OTHER.css }} />Frame / {protocol.proto}</span><strong>{protocol.packets.toLocaleString()} pkts · {byteLabel(protocol.bytes)} · {Math.round((protocol.bytes / protocolTotalBytes) * 100)}%</strong></button>)}</div>
-      </section>
-    ),
-    io: () => (
-      <section className="analysisTab">
-        <div className="analysisHeader"><p>I/O Graphs</p><h2>Traffic over time</h2></div>
-        <div className="wideTimeline">{trafficAnalysis.timelineBuckets.map((bytes, index) => <i key={`${index}-${bytes}`} style={{ height: `${Math.max(4, (bytes / trafficAnalysis.maxBucket) * 180)}px` }} title={byteLabel(bytes)} />)}</div>
-      </section>
-    ),
   }
 
   return (
     <main className="appShell">
-      <HeroAsciiOne>
-        <div className={[
-          menuCollapsed ? 'appFrame menuCollapsed' : 'appFrame',
+      <div className={[
+          'appFrame',
           screensaverActive ? 'screensaverActive' : ''
         ].filter(Boolean).join(' ')}>
-          <nav className="appMenu" aria-label="PacMap menu">
-            <div className="appMenuBrand">
-              <div>
-                <strong>pacmap</strong>
-                <span>{status}</span>
-              </div>
-              <button
-                className="menuCollapseButton"
-                type="button"
-                onClick={() => setMenuCollapsed((collapsed) => !collapsed)}
-                aria-label={menuCollapsed ? 'Expand menu' : 'Collapse menu'}
-                title={menuCollapsed ? 'Expand menu' : 'Collapse menu'}
-              >
-                {menuCollapsed ? '>' : '<'}
-              </button>
-            </div>
-            <div className="appMenuItems">
-              {Object.entries(TABS).map(([tab, label]) => (
-                <button
-                  className={activeTab === tab ? 'appMenuItem active' : 'appMenuItem'}
-                  key={tab}
-                  type="button"
-                  onClick={() => {
-                    setActiveTab(tab)
-                  }}
-                  title={label}
-                >
-                  <span className="appMenuShort" aria-hidden="true">
-                    {label.split(' ').map((word) => word[0]).join('').slice(0, 2)}
-                  </span>
-                  <span className="appMenuFull">{label}</span>
-                </button>
-              ))}
-            </div>
-          </nav>
-
           <section
-            className={activeTab === 'live' ? 'viewport liveViewport' : 'viewport analysisViewport'}
+            className="viewport liveViewport"
             aria-label={`${TABS[activeTab]} packet map`}
           >
-            {showLiveWorkspaceControls && !screensaverActive && (
+            {!screensaverActive && (
               <form className="trafficFilterBar" onSubmit={applyDisplayFilter}>
                 <span>Display Filter</span>
-                <input value={filterInput} onChange={(event) => setFilterInput(event.target.value)} placeholder="tcp.port == 443" />
+                <div className="filterInputWrap">
+                  <input
+                    value={filterInput}
+                    onChange={handleFilterInput}
+                    onFocus={handleFilterFocus}
+                    onBlur={handleFilterBlur}
+                    onKeyDown={handleFilterKeyDown}
+                    placeholder="tcp.port == 443"
+                    autoComplete="off"
+                  />
+                  {filterSuggestions.length > 0 && (
+                    <ul className="filterSuggestions">
+                      {filterSuggestions.map((s, i) => (
+                        <li
+                          key={s}
+                          className={i === suggestionIndex ? 'active' : ''}
+                          onMouseDown={() => pickSuggestion(s)}
+                        >
+                          {s}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
                 <button type="submit">Apply</button>
                 <button type="button" onClick={clearDisplayFilter}>Clear</button>
                 {filterError && <p className="filterError">{filterError}</p>}
@@ -2230,27 +2184,7 @@ export default function App() {
 
             {!screensaverActive && analysisContent[activeTab]?.()}
 
-            <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls" style={{ display: screensaverActive ? 'none' : undefined }}>
-              {!showLiveWorkspaceControls && (
-                <>
-                  <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom + 0.2))}>
-                    Zoom in
-                  </button>
-                  <button type="button" onClick={() => setCameraZoom((zoom) => clampZoom(zoom - 0.2))}>
-                    Zoom out
-                  </button>
-                  <button type="button" onClick={() => setCameraZoom(DEFAULT_CAMERA_ZOOM)}>
-                    Reset zoom
-                  </button>
-                  <select value={labelMode} onChange={(event) => setLabelMode(event.target.value)} aria-label="Node labels">
-                    {Object.entries(LABEL_MODES).map(([mode, label]) => (
-                      <option key={mode} value={mode}>
-                        {label}
-                      </option>
-                    ))}
-                  </select>
-                </>
-              )}
+            <section className="graphToolbar liveGraphToolbar" aria-label="Graph controls" style={{ display: screensaverActive ? 'none' : undefined }}>
               <button
                 type="button"
                 style={{ color: gesturesEnabled ? '#4af0b4' : undefined }}
@@ -2258,45 +2192,15 @@ export default function App() {
               >
                 {gesturesEnabled ? '✋ ON' : '✋ Gestures'}
               </button>
-              {!showLiveWorkspaceControls && <span>{Math.round(cameraZoom * 100)}%</span>}
             </section>
 
-            {selectedIp && activeTab !== 'live' && (
+            {selectedIp && (
               <button className="wholeNetworkButton" type="button" onClick={() => setSelectedIp(null)}>
                 Whole network
               </button>
             )}
-            {analysisActive && (
-              <section className="packetInspector" aria-label="Packet inspection">
-                <div className="inspectorPane packetList">
-                  <h3>Packet List</h3>
-                  <div className="packetTable">
-                    {['Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info'].map((heading) => <strong key={heading}>{heading}</strong>)}
-                    {packetRows.map((packet) => (
-                      <button
-                        className={packet.id === selectedPacketId ? 'selected tableRow' : 'tableRow'}
-                        key={packet.id}
-                        type="button"
-                        onClick={() => {
-                          setSelectedPacketId(packet.id)
-                          setSelectedIp(packet.src || packet.srcIp)
-                        }}
-                      >
-                        <span>{new Date((packet.timestamp || 0) * 1000).toLocaleTimeString()}</span>
-                        <span>{packet.src || packet.srcIp}</span>
-                        <span>{packet.dst || packet.dstIp}</span>
-                        <span>{packet.proto}</span>
-                        <span>{packet.size}</span>
-                        <span>{packetInfo(packet)}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </section>
-            )}
           </section>
         </div>
-      </HeroAsciiOne>
     </main>
   )
 }
