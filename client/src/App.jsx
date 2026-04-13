@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import HeroAsciiOne from './components/ui/hero-ascii-one.jsx'
 import './App.css'
 
@@ -18,7 +19,7 @@ const REPLAY_TICK_MS = 80
 const MIN_CAMERA_ZOOM = 0.55
 const MAX_CAMERA_ZOOM = 2.5
 const DEFAULT_CAMERA_ZOOM = 1
-const ORBIT_TARGET = new THREE.Vector3(0, 0, -140)
+const ORBIT_TARGET = new THREE.Vector3(0, 0, 0)
 const MIN_LAYOUT_SPREAD = 0.5
 const MAX_LAYOUT_SPREAD = 2.25
 const PAN_BOUND = 320
@@ -815,14 +816,6 @@ export default function App() {
   const cameraRef = useRef(null)
   const pointTargetRef = useRef({ active: false, ip: null, x: 0, y: 0 })
   const pointerLockedIpRef = useRef(null)
-  const orbitStateRef = useRef({
-    isPointerDown: false, isDrag: false, lastX: 0, lastY: 0,
-    theta: Math.PI * 0.18, phi: Math.PI * 0.28, radius: 820,
-    panX: 0, panY: 0, panZ: 0,
-    recenterPan: false,
-    target: ORBIT_TARGET.clone(),
-  })
-  const applyOrbitRef = useRef(null)
   const layoutSpreadRef = useRef({ value: 1, target: 1 })
   const ingestPacketRef = useRef(null)
   const resetGraphRef = useRef(null)
@@ -840,6 +833,8 @@ export default function App() {
     lockProgress: 0,
     mode: 'zoom',
   })
+
+  const applyOrbitRef = useRef(() => { })
   const screensaverActiveRef = useRef(false)
   const [screensaverActive, setScreensaverActive] = useState(false)
   const screensaverRef = useRef({ timer: null, spinAngle: 0 })
@@ -963,6 +958,7 @@ export default function App() {
       if (screensaverActiveRef.current) {
         screensaverActiveRef.current = false
         setScreensaverActive(false)
+        screensaverRef.current.initialized = false
       }
       screensaverRef.current.timer = setTimeout(() => {
         screensaverActiveRef.current = true
@@ -991,26 +987,29 @@ export default function App() {
 
     const camera = new THREE.PerspectiveCamera(55, mount.clientWidth / mount.clientHeight, 1, 4000)
     camera.position.set(0, 620, 520)
-    camera.lookAt(0, 0, 0)
     cameraRef.current = camera
-
-    function applyOrbit() {
-      const target = orbitStateRef.current.target
-      const x = orbitStateRef.current.radius * Math.sin(orbitStateRef.current.phi) * Math.sin(orbitStateRef.current.theta)
-      const y = orbitStateRef.current.radius * Math.cos(orbitStateRef.current.phi)
-      const z = orbitStateRef.current.radius * Math.sin(orbitStateRef.current.phi) * Math.cos(orbitStateRef.current.theta)
-      camera.position.set(target.x + x, target.y + y, target.z + z)
-      camera.lookAt(target)
-    }
-    applyOrbitRef.current = applyOrbit
-    orbitStateRef.current.target = ORBIT_TARGET.clone()
-    applyOrbit()
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
     renderer.setSize(mount.clientWidth, mount.clientHeight)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     mount.appendChild(renderer.domElement)
+
+    const controls = new OrbitControls(camera, renderer.domElement)
+    controls.enableDamping = true
+    controls.dampingFactor = 0.08
+    controls.screenSpacePanning = true
+    controls.minDistance = 200
+    controls.maxDistance = 2200
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.ROTATE,
+      MIDDLE: THREE.MOUSE.PAN,
+      RIGHT: THREE.MOUSE.PAN,
+    }
+    controls.touches = {
+      ONE: THREE.TOUCH.ROTATE,
+      TWO: THREE.TOUCH.DOLLY_PAN,
+    }
 
     scene.add(new THREE.HemisphereLight(0xffffff, 0x161616, 2.9))
     scene.add(new THREE.AmbientLight(0xffffff, 1.55))
@@ -1029,24 +1028,6 @@ export default function App() {
     function updateOrbitTarget() {
       let count = 0
       const center = new THREE.Vector3()
-      const orbit = orbitStateRef.current
-
-      orbit.panX = THREE.MathUtils.clamp(orbit.panX || 0, -PAN_BOUND, PAN_BOUND)
-      orbit.panY = THREE.MathUtils.clamp(orbit.panY || 0, -PAN_BOUND, PAN_BOUND)
-      orbit.panZ = THREE.MathUtils.clamp(orbit.panZ || 0, -PAN_BOUND, PAN_BOUND)
-
-      if (orbit.recenterPan) {
-        orbit.panX = THREE.MathUtils.lerp(orbit.panX, 0, 0.055)
-        orbit.panY = THREE.MathUtils.lerp(orbit.panY, 0, 0.055)
-        orbit.panZ = THREE.MathUtils.lerp(orbit.panZ, 0, 0.055)
-        if (Math.abs(orbit.panX) + Math.abs(orbit.panY) + Math.abs(orbit.panZ) < 0.6) {
-          orbit.panX = 0
-          orbit.panY = 0
-          orbit.panZ = 0
-          orbit.recenterPan = false
-        }
-      }
-
       nodeStore.forEach((node) => {
         if (!node.group.visible) return
         center.x += node.x
@@ -1054,21 +1035,10 @@ export default function App() {
         center.z += node.z
         count += 1
       })
-
-      if (!count) {
-        orbit.target.lerp(new THREE.Vector3(
-          ORBIT_TARGET.x + (orbit.panX || 0),
-          ORBIT_TARGET.y + (orbit.panY || 0),
-          ORBIT_TARGET.z + (orbit.panZ || 0),
-        ), 0.04)
-        return
+      if (count) {
+        center.multiplyScalar(1 / count)
+        controls.target.lerp(center, 0.06)
       }
-
-      center.multiplyScalar(1 / count)
-      center.x += orbit.panX || 0
-      center.y += orbit.panY || 0
-      center.z += orbit.panZ || 0
-      orbit.target.lerp(center, 0.06)
     }
 
     function snapshotState() {
@@ -1120,10 +1090,8 @@ export default function App() {
       setSelectedIp(null)
       pointTargetRef.current = { active: false, ip: null, x: 0, y: 0 }
       setPointReticle((current) => ({ ...current, active: false, locked: false }))
-      orbitStateRef.current.panX = 0
-      orbitStateRef.current.panY = 0
-      orbitStateRef.current.panZ = 0
-      orbitStateRef.current.recenterPan = false
+      controls.target.set(0, 0, 0)
+      controls.update()
       layoutSpreadRef.current.value = 1
       layoutSpreadRef.current.target = 1
     }
@@ -1536,14 +1504,28 @@ export default function App() {
       frameRef.current = requestAnimationFrame(animate)
       updateLayoutSpread()
       updateGraphVisuals()
+      console.log('nodes:', nodeStore.size, 'camera:', camera.position.y)
       updatePackets()
       updateOrbitTarget()
-      applyOrbit()
       if (screensaverActiveRef.current) {
+        if (!screensaverRef.current.initialized) {
+          screensaverRef.current.initialized = true
+          const offset = camera.position.clone().sub(controls.target)
+          screensaverRef.current.radius = Math.sqrt(offset.x * offset.x + offset.z * offset.z)
+          screensaverRef.current.y = camera.position.y
+          screensaverRef.current.spinAngle = Math.atan2(offset.x, offset.z)
+        }
         screensaverRef.current.spinAngle += 0.002
-        orbitStateRef.current.theta = screensaverRef.current.spinAngle
-        applyOrbit()
+        const r = screensaverRef.current.radius
+        const angle = screensaverRef.current.spinAngle
+        camera.position.set(
+          controls.target.x + r * Math.sin(angle),
+          screensaverRef.current.y,
+          controls.target.z + r * Math.cos(angle),
+        )
+        camera.lookAt(controls.target)
       }
+      controls.update()
 
       // cull labels by distance — only show closest 8 nodes
       const MAX_VISIBLE_LABELS = 8
@@ -1609,6 +1591,7 @@ export default function App() {
     }
 
     function handlePointerDown(event) {
+      if (event.shiftKey) return
       const bounds = renderer.domElement.getBoundingClientRect()
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
@@ -1619,42 +1602,15 @@ export default function App() {
         pointerLockedIpRef.current = hit.object.userData.ip
         pointTargetRef.current = { active: true, ip: hit.object.userData.ip, x: 0, y: 0 }
         setSelectedIp(hit.object.userData.ip)
+        controls.enabled = false
       } else {
-        // start drag — do NOT clear selection here
-        orbitStateRef.current.isPointerDown = true
-        orbitStateRef.current.isDrag = false
-        orbitStateRef.current.lastX = event.clientX
-        orbitStateRef.current.lastY = event.clientY
+        controls.enabled = true
       }
-    }
-
-    function handlePointerMove(event) {
-      const orbit = orbitStateRef.current
-      if (!orbit.isPointerDown) return
-      const dx = event.clientX - orbit.lastX
-      const dy = event.clientY - orbit.lastY
-      orbit.isDrag = true
-
-      if (event.shiftKey) {
-        const panSpeed = orbit.radius * 0.001
-        orbit.target.x -= dx * panSpeed
-        orbit.target.y += dy * panSpeed
-      } else {
-        orbit.theta -= dx * 0.006
-        orbit.phi = THREE.MathUtils.clamp(orbit.phi + dy * 0.006, 0.08, Math.PI - 0.08)
-      }
-
-      orbit.lastX = event.clientX
-      orbit.lastY = event.clientY
-      applyOrbit()
     }
 
     function handlePointerUp(event) {
-      const wasDrag = orbitStateRef.current.isDrag
-      orbitStateRef.current.isPointerDown = false
-      orbitStateRef.current.isDrag = false
-
-      if (!wasDrag && selectedIpRef.current) {
+      controls.enabled = true
+      if (selectedIpRef.current) {
         const bounds = renderer.domElement.getBoundingClientRect()
         pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
         pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
@@ -1664,22 +1620,15 @@ export default function App() {
         if (!hit) setSelectedIp(null)
       }
     }
-    function handleWheel(event) {
-      event.preventDefault()
-      orbitStateRef.current.radius = THREE.MathUtils.clamp(orbitStateRef.current.radius + event.deltaY * 0.8, 200, 2200)
-      applyOrbit()
-    }
 
     function handleResize() {
       camera.aspect = mount.clientWidth / mount.clientHeight
       camera.updateProjectionMatrix()
       renderer.setSize(mount.clientWidth, mount.clientHeight)
     }
+
     renderer.domElement.addEventListener('pointerdown', handlePointerDown)
-    renderer.domElement.addEventListener('pointermove', handlePointerMove)
     renderer.domElement.addEventListener('pointerup', handlePointerUp)
-    renderer.domElement.addEventListener('pointerleave', handlePointerUp)
-    renderer.domElement.addEventListener('wheel', handleWheel, { passive: false })
     window.addEventListener('resize', handleResize)
     animate()
 
@@ -1692,6 +1641,7 @@ export default function App() {
     ws.addEventListener('message', (event) => {
       const data = JSON.parse(event.data)
       if (data.type === 'packet') {
+        console.log('packet received', data)
         const packet = normalizePacket(data, 'live', Date.now())
         livePacketsRef.current.push(packet)
         if (livePacketsRef.current.length > LIVE_PACKET_HISTORY_LIMIT) {
@@ -1731,11 +1681,7 @@ export default function App() {
       ws.close()
       cancelAnimationFrame(frameRef.current)
       window.removeEventListener('resize', handleResize)
-      renderer.domElement.removeEventListener('pointermove', handlePointerMove)
-      renderer.domElement.removeEventListener('pointerup', handlePointerUp)
-      renderer.domElement.removeEventListener('pointerleave', handlePointerUp)
-      renderer.domElement.removeEventListener('pointerdown', handlePointerDown)
-      renderer.domElement.removeEventListener('wheel', handleWheel)
+      controls.dispose()
 
       nodeStore.forEach((node) => {
         scene.remove(node.group)
@@ -1774,15 +1720,25 @@ export default function App() {
       return
     }
 
-    const orbitRef = orbitStateRef
-    const orbitApply = applyOrbitRef
+    useEffect(() => {
+      if (!mountRef.current) return
+      const mount = mountRef.current
+      const canvas = mount.querySelector('canvas')
+      if (!canvas) return
+      const observer = new ResizeObserver(() => {
+        if (!cameraRef.current) return
+        cameraRef.current.aspect = mount.clientWidth / mount.clientHeight
+        cameraRef.current.updateProjectionMatrix()
+      })
+      observer.observe(mount)
+      return () => observer.disconnect()
+    }, [])
+
     const cam = cameraRef
     const nodes = nodesRef
 
     import('./useHandGestures.js').then((module) => {
       const init = module.useHandGestures({
-        orbitStateRef: orbitRef,
-        applyOrbitRef: orbitApply,
         cameraRef: cam,
         layoutSpreadRef,
         onPointAt: ({
@@ -2191,8 +2147,11 @@ export default function App() {
   return (
     <main className="appShell">
       <HeroAsciiOne>
-        <div className={menuCollapsed ? 'appFrame menuCollapsed' : 'appFrame'}>
-          <nav className="appMenu" aria-label="PacMap menu" style={{ visibility: screensaverActive ? 'hidden' : undefined }}>
+        <div className={[
+          menuCollapsed ? 'appFrame menuCollapsed' : 'appFrame',
+          screensaverActive ? 'screensaverActive' : ''
+        ].filter(Boolean).join(' ')}>
+          <nav className="appMenu" aria-label="PacMap menu">
             <div className="appMenuBrand">
               <div>
                 <strong>pacmap</strong>
@@ -2232,7 +2191,7 @@ export default function App() {
             className={activeTab === 'live' ? 'viewport liveViewport' : 'viewport analysisViewport'}
             aria-label={`${TABS[activeTab]} packet map`}
           >
-            {showLiveWorkspaceControls && (
+            {showLiveWorkspaceControls && !screensaverActive && (
               <form className="trafficFilterBar" onSubmit={applyDisplayFilter}>
                 <span>Display Filter</span>
                 <input value={filterInput} onChange={(event) => setFilterInput(event.target.value)} placeholder="tcp.port == 443" />
@@ -2269,7 +2228,7 @@ export default function App() {
               />
             )}
 
-            {activeTab !== 'live' && !screensaverActive && analysisContent[activeTab]?.()}
+            {!screensaverActive && analysisContent[activeTab]?.()}
 
             <section className={showLiveWorkspaceControls ? 'graphToolbar liveGraphToolbar' : 'graphToolbar'} aria-label="Graph controls" style={{ display: screensaverActive ? 'none' : undefined }}>
               {!showLiveWorkspaceControls && (

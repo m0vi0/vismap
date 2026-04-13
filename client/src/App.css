@@ -95,7 +95,7 @@ button { font: inherit; }
   min-height: 0;
   height: 100%;
   overflow: hidden;
-  background: var(--bg);
+  background: #000000;
 }
 
 .asciiHero .asciiHeader { display: none; }
@@ -136,19 +136,43 @@ button { font: inherit; }
   z-index: 2;
   display: grid;
   height: 100%;
-  grid-template-columns: 200px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
   padding: 0;
 }
 
-.appFrame.menuCollapsed {
-  grid-template-columns: 52px minmax(0, 1fr);
+.appFrame.menuCollapsed .appMenu {
+  width: 52px;
+}
+
+.appFrame.menuCollapsed .liveViewport .analysisTab {
+  left: 52px;
+}
+
+.appFrame.screensaverActive {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+.appFrame.screensaverActive .appMenu {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 10;
+  width: 200px;
+  visibility: hidden;
 }
 
 /* ── Sidebar ───────────────────────────────────────────── */
 
 .appMenu {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  z-index: 10;
   display: flex;
+  width: 200px;
   min-width: 0;
   flex-direction: column;
   gap: 0;
@@ -468,6 +492,7 @@ button { font: inherit; }
 .liveViewport .analysisTab {
   top: 48px;
   bottom: 0;
+  left: 200px;
   width: 380px;
 }
 
