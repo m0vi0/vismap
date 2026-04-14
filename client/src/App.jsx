@@ -1520,10 +1520,18 @@ export default function App() {
       }
       controls.update()
 
-      // cull labels by distance — only show closest 8 nodes
+      // cull labels by distance — only show closest 8 nodes within camera frame
       const MAX_VISIBLE_LABELS = 8
       const cameraPos = camera.position
       const selected = selectedIpRef.current
+
+      // build frustum from current camera matrices so only in-frame nodes compete for label slots
+      camera.updateWorldMatrix(true, false)
+      const _frustum = new THREE.Frustum()
+      _frustum.setFromProjectionMatrix(
+        new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+      )
+      const inFrustum = (n) => _frustum.containsPoint(new THREE.Vector3(n.x, n.y, n.z))
 
       if (selected && nodeStore.has(selected)) {
         // subcluster mode — cull within neighborhood only
@@ -1537,7 +1545,7 @@ export default function App() {
         const neighbors = new Set([selected, ...(adjacency.get(selected) || [])])
 
         const subclusterByDistance = [...nodeStore.values()]
-          .filter(n => n.group.visible && neighbors.has(n.ip))
+          .filter(n => n.group.visible && neighbors.has(n.ip) && inFrustum(n))
           .map(n => ({
             node: n,
             dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
@@ -1562,9 +1570,9 @@ export default function App() {
         })
 
       } else {
-        // global mode — cull across all visible nodes
+        // global mode — cull across all visible in-frame nodes
         const nodesByDistance = [...nodeStore.values()]
-          .filter(n => n.group.visible)
+          .filter(n => n.group.visible && inFrustum(n))
           .map(n => ({
             node: n,
             dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
