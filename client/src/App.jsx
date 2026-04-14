@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { classifyIp, serializeCheckpoint, computeCheckpointDiff, fmtBytes } from './checkpointEngine.js'
 import './App.css'
 
 const WS_URL = 'ws://127.0.0.1:8765'
@@ -578,6 +579,22 @@ function isPrivateIpv4(ip) {
   return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
 }
 
+function isBcastIp(ip) {
+  return ip === '255.255.255.255' || (ip.includes('.') && ip.endsWith('.255'))
+}
+
+function isMcastIp(ip) {
+  return ip.startsWith('224.') || ip.startsWith('239.') || ip.startsWith('ff0') || ip.startsWith('ff02')
+}
+
+function packetProtocolGroup(packet) {
+  const proto = String(packet.proto || '').toUpperCase()
+  const dst = packet.dst || packet.dstIp || ''
+  if (isBcastIp(dst)) return 'BCAST'
+  if (isMcastIp(dst)) return 'MCAST'
+  return proto || 'OTHER'
+}
+
 function createEmptyAnalysis() {
   return {
     conversations: [],
@@ -754,11 +771,22 @@ function subnetKey(ip) {
   return ip
 }
 
-function clusterAnchor(ip) {
+function clusterAnchor(ip, dnsIps) {
+  const isBcast = isBcastIp(ip)
+  const isMcast = isMcastIp(ip)
+  const isDns = dnsIps ? dnsIps.has(ip) : false
+  const isLocal = isPrivateIpv4(ip)
+
+  let radius
+  if (isBcast || isMcast) radius = 200
+  else if (isDns) radius = 40
+  else if (isLocal) radius = 100
+  else radius = 165
+
   const hash = hashString(subnetKey(ip))
   const theta = ((hash & 0xffff) / 0xffff) * Math.PI * 2
-  const z = (((hash >>> 16) & 0xffff) / 0xffff) * 2 - 1
-  const radius = 135
+  const spread = (isBcast || isMcast || isDns) ? 0.2 : 0.6
+  const z = (((hash >>> 16) & 0xffff) / 0xffff) * spread * 2 - spread
   const ring = Math.sqrt(Math.max(0, 1 - z * z))
 
   return {
@@ -867,15 +895,72 @@ export default function App() {
   const analysisSnapshotTimerRef = useRef(null)
   const graphRebuildTimerRef = useRef(null)
 
+  // Feature 4 — protocol toggles
+  const [activeProtocols, setActiveProtocols] = useState(() => new Set(['TCP','UDP','DNS','ARP','BCAST','MCAST','OTHER']))
+
+  // Feature 2 — inspection drawer
+  const [drawerTab, setDrawerTab] = useState('overview')
+
+  // Feature 8 — hover / pinned labels
+  const hoveredIpRef = useRef(null)
+  const pinnedIpsRef = useRef(new Set())
+
+  // Feature 7 — alerts
+  const alertsRef = useRef([])
+  const seenIpsRef = useRef(new Set())
+
+  // Feature 6 — DNS zone tracking
+  const dnsServerIpsRef = useRef(new Set())
+
+  // Feature 3 — sparkline canvas
+  const sparklineRef = useRef(null)
+
+  // ── Phase 1: Checkpoint + Diff system ──────────────────────
+
+  const [checkpoints, setCheckpoints] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('pacmap_checkpoints') || '[]') }
+    catch { return [] }
+  })
+  const [checkpointPanelOpen, setCheckpointPanelOpen] = useState(false)
+  const [activeDiff, setActiveDiff] = useState(null)
+  // activeDiff shape: { baseId: string|'current', compareId: string|'current', result: DiffResult } | null
+  const [diffMode, setDiffMode] = useState(false)  // "Diff Only" toggle
+  const [diffReasonTooltip, setDiffReasonTooltip] = useState(null) // { ip, x, y, text } | null
+  const [rightPanelOpen, setRightPanelOpen] = useState(true)
+
+  // Bridge refs — assigned inside Three.js useEffect closure (where nodeStore/edgeStore live)
+  const applyDiffStateRef = useRef(null)
+  const clearDiffStateRef = useRef(null)
+  const queueAutoCheckpointRef = useRef(null)
+  const activeDiffRef = useRef(null)
+  const setDiffReasonTooltipRef = useRef(setDiffReasonTooltip)
+
+  // Auto-checkpoint accumulation
+  const autoCheckpointQueueRef = useRef([])
+  const autoCheckpointTimerRef = useRef(null)
+  // Track external connections seen to avoid re-triggering auto-checkpoint for known edges
+  const seenExternalEdgesRef = useRef(new Set())
+  // Per-frame spike detection counter
+  const frameCountRef = useRef(0)
+  const diffModeRef = useRef(false)
+
+  // Persist checkpoints to localStorage
+  useEffect(() => {
+    localStorage.setItem('pacmap_checkpoints', JSON.stringify(checkpoints.slice(-50)))
+  }, [checkpoints])
+
   const sourcePackets = useMemo(() => {
     if (activeSource === 'replay') return replayPackets.slice(Math.max(0, replayIndex - ANALYSIS_PACKET_WINDOW), replayIndex)
     return livePackets.slice(-ANALYSIS_PACKET_WINDOW)
   }, [activeSource, livePackets, replayIndex, replayPackets])
 
-  const filteredPackets = useMemo(
-    () => sourcePackets.filter((packet) => packetMatchesFilter(packet, activeFilter)),
-    [activeFilter, sourcePackets],
-  )
+  const filteredPackets = useMemo(() => {
+    return sourcePackets.filter((packet) => {
+      const group = packetProtocolGroup(packet)
+      if (!activeProtocols.has(group)) return false
+      return packetMatchesFilter(packet, activeFilter)
+    })
+  }, [activeFilter, sourcePackets, activeProtocols])
 
   const selectedPacket = useMemo(
     () => filteredPackets.find((packet) => packet.id === selectedPacketId) || null,
@@ -921,6 +1006,41 @@ export default function App() {
 
     return undefined
   }, [conversationSort, filteredPackets, replayMeta])
+
+  // Feature 3 — draw sparkline when analysis updates
+  useEffect(() => {
+    const canvas = sparklineRef.current
+    if (!canvas) return
+    const buckets = trafficAnalysis.timelineBuckets
+    const maxBucket = trafficAnalysis.maxBucket || 1
+    const ctx = canvas.getContext('2d')
+    const w = canvas.width
+    const h = canvas.height
+    ctx.clearRect(0, 0, w, h)
+    const mean = buckets.reduce((s, v) => s + v, 0) / buckets.length
+    const sigma = Math.sqrt(buckets.reduce((s, v) => s + (v - mean) ** 2, 0) / buckets.length)
+    const spikeThreshold = mean + 2 * sigma
+    const barW = w / buckets.length
+    buckets.forEach((v, i) => {
+      const barH = (v / maxBucket) * (h - 2)
+      const isSpike = v > spikeThreshold && v > 0
+      ctx.fillStyle = isSpike ? 'rgba(251,146,60,0.85)' : 'rgba(129,140,248,0.6)'
+      ctx.fillRect(i * barW, h - barH, barW - 1, barH)
+    })
+  }, [trafficAnalysis])
+
+  // Keep refs pointing at latest values so Three.js loop doesn't get stale closures
+  useEffect(() => {
+    queueAutoCheckpointRef.current = queueAutoCheckpoint
+  })
+  useEffect(() => {
+    diffModeRef.current = diffMode
+  }, [diffMode])
+
+  useEffect(() => {
+    activeDiffRef.current = activeDiff
+    setDiffReasonTooltipRef.current = setDiffReasonTooltip
+  }, [activeDiff])
 
   useEffect(() => {
     showLabelsRef.current = showLabels
@@ -1004,6 +1124,21 @@ export default function App() {
     controls.minPolarAngle = 0
     controls.maxPolarAngle = Math.PI
 
+    // Pan reset fix: skip updateOrbitTarget() while user is actively controlling camera
+    let orbitActive = false
+    let orbitActiveCooldown = null
+    controls.addEventListener('start', () => {
+      orbitActive = true
+      if (orbitActiveCooldown) clearTimeout(orbitActiveCooldown)
+    })
+    controls.addEventListener('end', () => {
+      if (orbitActiveCooldown) clearTimeout(orbitActiveCooldown)
+      orbitActiveCooldown = setTimeout(() => {
+        orbitActive = false
+        orbitActiveCooldown = null
+      }, 500)
+    })
+
     scene.add(new THREE.HemisphereLight(0xffffff, 0x161616, 2.9))
     scene.add(new THREE.AmbientLight(0xffffff, 1.55))
     const keyLight = new THREE.DirectionalLight(0xffffff, 2.1)
@@ -1016,6 +1151,10 @@ export default function App() {
     const nodeGeometry = new THREE.SphereGeometry(8, 20, 14)
     const packetGeometry = new THREE.SphereGeometry(1.4, 10, 10)
     const raycaster = new THREE.Raycaster()
+
+    // Scratch objects for ring billboarding — reused every frame, zero allocations
+    const _spinQ = new THREE.Quaternion()
+    const _zAxis = new THREE.Vector3(0, 0, 1)
     const pointer = new THREE.Vector2()
 
     function updateOrbitTarget() {
@@ -1078,6 +1217,8 @@ export default function App() {
         node.mesh.material.dispose()
         node.label.material.map.dispose()
         node.label.material.dispose()
+        node.ring.geometry.dispose()
+        node.ring.material.dispose()
       })
       nodeStore.clear()
       setSelectedIp(null)
@@ -1114,6 +1255,11 @@ export default function App() {
       label.position.set(0, 19, 0)
       group.add(label)
 
+      const ringGeo = new THREE.TorusGeometry(12, 1.2, 6, 32)
+      const ringMat = new THREE.MeshBasicMaterial({ color: 0x60a5fa, transparent: true, opacity: 0 })
+      const ring = new THREE.Mesh(ringGeo, ringMat)
+      group.add(ring)
+
       scene.add(group)
 
       const node = {
@@ -1121,6 +1267,7 @@ export default function App() {
         group,
         mesh,
         label,
+        ring,
         x: position.x,
         y: position.y,
         z: position.z,
@@ -1134,9 +1281,10 @@ export default function App() {
         packets: 0,
         recentBytes: 0,
         renderScale: 1,
-        clusterAnchor: clusterAnchor(ip),
+        clusterAnchor: clusterAnchor(ip, dnsServerIpsRef.current),
         mac: '',
         labelText: ip,
+        ringSpinAngle: 0,
       }
 
       nodeStore.set(ip, node)
@@ -1337,9 +1485,46 @@ export default function App() {
 
       const size = Number(packet.size) || 0
       const proto = packet.proto || 'OTHER'
+
+      // Feature 6 — track DNS servers (responses come FROM port 53)
+      if (proto === 'DNS' && (Number(packet.srcPort) === 53)) {
+        dnsServerIpsRef.current.add(src)
+      }
+
       const srcNode = ensureNode(src)
       const dstNode = ensureNode(dst)
+
+      // Feature 7 — new host alerts + auto-checkpoint
+      if (!seenIpsRef.current.has(src)) {
+        seenIpsRef.current.add(src)
+        alertsRef.current.push({ type: 'newHost', ip: src, ts: Date.now(), label: 'New Host' })
+        if (alertsRef.current.length > 20) alertsRef.current.shift()
+        const kind = classifyIp(src)
+        if (kind !== 'multicast' && kind !== 'broadcast' && kind !== 'loopback') {
+          queueAutoCheckpointRef.current?.('New host discovered')
+        }
+      }
+      if (!seenIpsRef.current.has(dst)) {
+        seenIpsRef.current.add(dst)
+        alertsRef.current.push({ type: 'newHost', ip: dst, ts: Date.now(), label: 'New Host' })
+        if (alertsRef.current.length > 20) alertsRef.current.shift()
+        const kind = classifyIp(dst)
+        if (kind !== 'multicast' && kind !== 'broadcast' && kind !== 'loopback') {
+          queueAutoCheckpointRef.current?.('New host discovered')
+        }
+      }
       const edge = ensureEdge(src, dst)
+
+      // Auto-checkpoint: new external connection
+      const edgeId = `${src}<->${dst}`
+      if (!seenExternalEdgesRef.current.has(edgeId)) {
+        const srcKind = classifyIp(src)
+        const dstKind = classifyIp(dst)
+        if (srcKind === 'external' || dstKind === 'external') {
+          seenExternalEdgesRef.current.add(edgeId)
+          queueAutoCheckpointRef.current?.('New external connection detected')
+        }
+      }
       if (packet.srcMac) srcNode.mac = packet.srcMac
       if (packet.dstMac) dstNode.mac = packet.dstMac
 
@@ -1387,9 +1572,14 @@ export default function App() {
         const scale = (nodeRadius(node) / 8) * nodeRenderScale(node)
         const labelScale = THREE.MathUtils.clamp(nodeRenderScale(node), 0.55, 1)
         const pulse = THREE.MathUtils.clamp(node.recentBytes / 4500, 0, 1.8)
+        const t = performance.now() / 1000
+        const ds = node.diffState
+        const diffScalePulse = ds === 'added'
+          ? Math.sin(t * 2.5) * 0.15 + 0.15
+          : 0
         refreshNodeLabel(node)
         node.group.position.set(node.x, node.y, node.z)
-        node.mesh.scale.lerp(new THREE.Vector3(scale + pulse, scale + pulse, scale + pulse), 0.18)
+        node.mesh.scale.lerp(new THREE.Vector3(scale + pulse + diffScalePulse, scale + pulse + diffScalePulse, scale + pulse + diffScalePulse), 0.18)
         node.mesh.material.opacity = THREE.MathUtils.lerp(node.mesh.material.opacity, visibleWeight, 0.12)
         node.label.visible = labelsEnabled
         const maxBytes = Math.max(...[...nodeStore.values()].map(n => n.bytes), 1)
@@ -1409,6 +1599,59 @@ export default function App() {
         node.label.position.y = 22 + scale * 7
         node.label.scale.lerp(new THREE.Vector3(150 * labelScale, 38 * labelScale, 1), 0.18)
         node.recentBytes *= 0.91
+
+        // Emissive glow: depth focus first, then diff state overrides
+        const emissiveDepth = hasFocus ? depths.get(node.ip) : undefined
+        const targetEmissive = emissiveDepth === 0 ? 0.9 : emissiveDepth === 1 ? 0.4 : 0.1
+        node.mesh.material.emissiveIntensity = THREE.MathUtils.lerp(node.mesh.material.emissiveIntensity, targetEmissive, 0.1)
+        if (emissiveDepth === 0) node.mesh.material.emissive.setHex(0x3b82f6)
+        else node.mesh.material.emissive.setHex(0x9b9ba3)
+
+        // Diff visual state — overrides emissive; ring color driven by diff state
+        if (ds === 'added') {
+          node.mesh.material.emissive.setHex(0x34d399)
+          node.mesh.material.emissiveIntensity = THREE.MathUtils.lerp(node.mesh.material.emissiveIntensity, 0.9, 0.12)
+        } else if (ds === 'increased') {
+          node.mesh.material.emissive.setHex(0xfbbf24)
+          node.mesh.material.emissiveIntensity = THREE.MathUtils.lerp(node.mesh.material.emissiveIntensity, 0.65, 0.12)
+        } else if (ds === 'decreased') {
+          node.mesh.material.emissive.setHex(0xf87171)
+          node.mesh.material.emissiveIntensity = THREE.MathUtils.lerp(node.mesh.material.emissiveIntensity, 0.45, 0.12)
+        } else if (ds === 'unchanged' && diffModeRef.current) {
+          node.mesh.material.opacity = THREE.MathUtils.lerp(node.mesh.material.opacity, 0.06, 0.1)
+        }
+
+        // Ring: selection takes priority; diff state drives color/pulse otherwise
+        const isSelected = node.ip === selectedIpRef.current
+        if (isSelected) {
+          if (node.ring.material.color.getHex() !== 0x60a5fa) node.ring.material.color.setHex(0x60a5fa)
+          node.ring.material.opacity = THREE.MathUtils.lerp(node.ring.material.opacity, 0.85, 0.1)
+          node.ringSpinAngle += 0.012
+        } else if (ds === 'added') {
+          if (node.ring.material.color.getHex() !== 0x34d399) node.ring.material.color.setHex(0x34d399)
+          node.ring.material.opacity = Math.sin(t * 2.5) * 0.28 + 0.62  // 0.34–0.90 pulse
+          node.ringSpinAngle += 0.006
+        } else if (ds === 'increased') {
+          if (node.ring.material.color.getHex() !== 0xfbbf24) node.ring.material.color.setHex(0xfbbf24)
+          node.ring.material.opacity = THREE.MathUtils.lerp(node.ring.material.opacity, 0.55, 0.1)
+          node.ringSpinAngle += 0.004
+        } else if (ds === 'decreased') {
+          if (node.ring.material.color.getHex() !== 0xf87171) node.ring.material.color.setHex(0xf87171)
+          node.ring.material.opacity = THREE.MathUtils.lerp(node.ring.material.opacity, 0.4, 0.1)
+        } else {
+          if (node.ring.material.color.getHex() !== 0x60a5fa) node.ring.material.color.setHex(0x60a5fa)
+          node.ring.material.opacity = THREE.MathUtils.lerp(node.ring.material.opacity, 0, 0.1)
+        }
+
+        // Phase 1 — Traffic spike detection for auto-checkpoint (sampled every 120 frames)
+        frameCountRef.current++
+        if (frameCountRef.current % 120 === 0 && node.recentBytes > 0) {
+          const avg = node.avgRecentBytes || node.recentBytes
+          if (node.recentBytes > avg * 5 && node.recentBytes > 12000) {
+            queueAutoCheckpointRef.current?.('Traffic spike detected')
+          }
+          node.avgRecentBytes = avg * 0.9 + node.recentBytes * 0.1
+        }
       })
 
       edgeList.forEach((edge) => {
@@ -1438,6 +1681,18 @@ export default function App() {
         positions.needsUpdate = true
         edge.mesh.geometry.computeBoundingSphere()
         edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, targetOpacity, 0.12)
+
+        // Diff state for edges
+        if (edge.diffState === 'added') {
+          if (edge.mesh.material.color.getHex() !== 0x34d399) edge.mesh.material.color.setHex(0x34d399)
+          edge.mesh.material.opacity = Math.sin(performance.now() / 1000 * 3.0) * 0.3 + 0.6
+        } else {
+          if (edge.mesh.material.color.getHex() !== 0xf2f2f5) edge.mesh.material.color.setHex(0xf2f2f5)
+          if (diffModeRef.current && !edge.diffState) {
+            edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.02, 0.1)
+          }
+        }
+
         edge.recentBytes *= 0.88
         edge.recentPackets *= 0.86
       })
@@ -1484,8 +1739,44 @@ export default function App() {
 
     ingestPacketRef.current = ingestPacket
     resetGraphRef.current = clearGraph
-    snapshotGraphRef.current = snapshotState
+    // Expose plain-data copies of nodeStore/edgeStore for checkpoint serialization
+    snapshotGraphRef.current = function captureGraphData() {
+      const nodeMap = new Map()
+      nodeStore.forEach((n, ip) => nodeMap.set(ip, { ip, bytes: n.bytes, packets: n.packets, mac: n.mac }))
+      const edgeMap = new Map()
+      edgeStore.forEach((e, key) => edgeMap.set(key, { src: e.src, dst: e.dst, bytes: e.bytes, packets: e.packets }))
+      return { nodeStore: nodeMap, edgeStore: edgeMap }
+    }
     rebuildGraphRef.current = rebuildGraph
+
+    // Apply diff visual states to nodeStore and edgeStore entries
+    applyDiffStateRef.current = function(diffResult) {
+      const addedSet = new Set(diffResult.addedNodes.map(n => n.ip))
+      const changedMap = new Map(diffResult.changedNodes.map(n => [n.ip, n]))
+      nodeStore.forEach((node, ip) => {
+        if (addedSet.has(ip)) node.diffState = 'added'
+        else if (changedMap.has(ip)) {
+          node.diffState = changedMap.get(ip).bytesDelta > 0 ? 'increased' : 'decreased'
+        } else {
+          node.diffState = 'unchanged'
+        }
+      })
+
+      // Edges — mark added edges (both key orderings)
+      const addedEdgeKeys = new Set(
+        diffResult.addedEdges.flatMap(e => [`${e.src}<->${e.dst}`, `${e.dst}<->${e.src}`])
+      )
+      edgeStore.forEach((edge, key) => {
+        edge.diffState = addedEdgeKeys.has(key) ? 'added' : null
+      })
+    }
+    clearDiffStateRef.current = function() {
+      nodeStore.forEach(node => { delete node.diffState })
+      edgeStore.forEach(edge => { delete edge.diffState })
+    }
+
+    // queueAutoCheckpointRef.current is set in the component body to point at queueAutoCheckpoint()
+    // so it can be called from inside this closure without a circular dependency.
 
     function updateLayoutSpread() {
       const spread = layoutSpreadRef.current
@@ -1499,7 +1790,7 @@ export default function App() {
       updateGraphVisuals()
       console.log('nodes:', nodeStore.size, 'camera:', camera.position.y)
       updatePackets()
-      updateOrbitTarget()
+      if (!orbitActive) updateOrbitTarget()
       if (screensaverActiveRef.current) {
         if (!screensaverRef.current.initialized) {
           screensaverRef.current.initialized = true
@@ -1584,8 +1875,18 @@ export default function App() {
         })
       }
 
+      // Feature 8 — always show hovered and pinned labels
+      if (hoveredIpRef.current && nodeStore.has(hoveredIpRef.current)) {
+        nodeStore.get(hoveredIpRef.current).label.visible = showLabelsRef.current
+      }
+      pinnedIpsRef.current.forEach(ip => {
+        if (nodeStore.has(ip)) nodeStore.get(ip).label.visible = showLabelsRef.current
+      })
+
       nodeStore.forEach((node) => {
         node.label.quaternion.copy(camera.quaternion)
+        node.ring.quaternion.copy(camera.quaternion)
+          .multiply(_spinQ.setFromAxisAngle(_zAxis, node.ringSpinAngle))
       })
 
       renderer.render(scene, camera)
@@ -1610,6 +1911,41 @@ export default function App() {
       } else {
         controls.enabled = true
       }
+    }
+
+    function handlePointerMove(event) {
+      const bounds = renderer.domElement.getBoundingClientRect()
+      pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
+      pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
+      raycaster.setFromCamera(pointer, camera)
+      const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.mesh)
+      const hit = raycaster.intersectObjects(meshes, false)[0]
+      const ip = hit?.object?.userData?.ip || null
+      hoveredIpRef.current = ip
+
+      // Diff tooltip
+      const diff = activeDiffRef.current
+      if (ip && diff) {
+        const node = nodeStore.get(ip)
+        const ds = node?.diffState
+        if (ds && ds !== 'unchanged') {
+          let text
+          if (ds === 'added') {
+            text = 'Added in compare state'
+          } else {
+            const changed = diff.result.changedNodes.find(n => n.ip === ip)
+            text = changed ? changed.reason : ds === 'increased' ? '↑ traffic' : '↓ traffic'
+          }
+          setDiffReasonTooltipRef.current({ ip, x: event.clientX, y: event.clientY, text })
+          return
+        }
+      }
+      setDiffReasonTooltipRef.current(null)
+    }
+
+    function handlePointerLeave() {
+      hoveredIpRef.current = null
+      setDiffReasonTooltipRef.current(null)
     }
 
     function handlePointerUp(event) {
@@ -1638,6 +1974,8 @@ export default function App() {
 
     renderer.domElement.addEventListener('pointerdown', handlePointerDown)
     renderer.domElement.addEventListener('pointerup', handlePointerUp)
+    renderer.domElement.addEventListener('pointermove', handlePointerMove)
+    renderer.domElement.addEventListener('pointerleave', handlePointerLeave)
     window.addEventListener('resize', handleResize)
     animate()
 
@@ -1687,8 +2025,12 @@ export default function App() {
       if (livePacketFlushRef.current !== null) window.clearTimeout(livePacketFlushRef.current)
       if (analysisSnapshotTimerRef.current !== null) window.clearTimeout(analysisSnapshotTimerRef.current)
       if (graphRebuildTimerRef.current !== null) window.clearTimeout(graphRebuildTimerRef.current)
+      if (autoCheckpointTimerRef.current !== null) window.clearTimeout(autoCheckpointTimerRef.current)
+      if (orbitActiveCooldown) clearTimeout(orbitActiveCooldown)
       ws.close()
       cancelAnimationFrame(frameRef.current)
+      renderer.domElement.removeEventListener('pointermove', handlePointerMove)
+      renderer.domElement.removeEventListener('pointerleave', handlePointerLeave)
       window.removeEventListener('resize', handleResize)
       controls.dispose()
 
@@ -1697,6 +2039,8 @@ export default function App() {
         node.mesh.material.dispose()
         node.label.material.map.dispose()
         node.label.material.dispose()
+        node.ring.geometry.dispose()
+        node.ring.material.dispose()
       })
       edgeStore.forEach((edge) => {
         scene.remove(edge.mesh)
@@ -1713,6 +2057,8 @@ export default function App() {
       resetGraphRef.current = null
       snapshotGraphRef.current = null
       rebuildGraphRef.current = null
+      applyDiffStateRef.current = null
+      clearDiffStateRef.current = null
       cameraRef.current = null
       renderer.dispose()
 
@@ -2110,12 +2456,107 @@ export default function App() {
 
   const reticleScale = THREE.MathUtils.clamp(1 / cameraZoom, 0.72, 1.35)
 
+  // ── Checkpoint handlers ──────────────────────────────────
+
+  function takeCheckpoint(opts = {}) {
+    const graphData = snapshotGraphRef.current?.()
+    if (!graphData) return null
+    const serialized = serializeCheckpoint(graphData.nodeStore, graphData.edgeStore, trafficAnalysis)
+    const cp = {
+      id: crypto.randomUUID(),
+      label: opts.label || `Checkpoint ${new Date().toLocaleTimeString()}`,
+      createdAt: Date.now(),
+      type: opts.type || 'manual',
+      reason: opts.reason || null,
+      eventSummary: opts.eventSummary || [],
+      ...serialized,
+    }
+    setCheckpoints(prev => {
+      const next = [...prev, cp]
+      return next.length > 50 ? next.slice(next.length - 50) : next
+    })
+    return cp
+  }
+
+  function queueAutoCheckpoint(reason) {
+    autoCheckpointQueueRef.current.push(reason)
+    if (autoCheckpointTimerRef.current) return
+    autoCheckpointTimerRef.current = window.setTimeout(() => {
+      autoCheckpointTimerRef.current = null
+      const reasons = autoCheckpointQueueRef.current.splice(0)
+      const unique = [...new Set(reasons)]
+      const label = unique.length === 1 ? `Auto: ${unique[0]}` : `Auto: ${unique.length} Network Changes`
+      takeCheckpoint({ type: 'auto', reason: unique[0], eventSummary: unique, label })
+    }, 4000)
+  }
+
+  function buildCurrentState() {
+    const graphData = snapshotGraphRef.current?.()
+    if (!graphData) return null
+    const serialized = serializeCheckpoint(graphData.nodeStore, graphData.edgeStore, trafficAnalysis)
+    const protocolSummary = {}
+    trafficAnalysis.protocols.forEach(p => { protocolSummary[p.proto] = { bytes: p.bytes, packets: p.packets } })
+    return { ...serialized, protocolSummary }
+  }
+
+  function computeDiff(baseId, compareId = 'current') {
+    const getState = (id) => {
+      if (id === 'current') return buildCurrentState()
+      return checkpoints.find(c => c.id === id) || null
+    }
+    const base = getState(baseId)
+    const compare = getState(compareId)
+    if (!base || !compare) return
+    const result = computeCheckpointDiff(base, compare)
+    setActiveDiff({ baseId, compareId, result })
+    applyDiffStateRef.current?.(result)
+  }
+
+  function clearDiff() {
+    setActiveDiff(null)
+    setDiffMode(false)
+    clearDiffStateRef.current?.()
+  }
+
+  // Feature 1 — summary chip data
+  const topTalker = trafficAnalysis.endpoints[0] || null
+  const mostPeers = (() => {
+    const peerCount = new Map()
+    trafficAnalysis.conversations.forEach(c => {
+      peerCount.set(c.src, (peerCount.get(c.src) || 0) + 1)
+      peerCount.set(c.dst, (peerCount.get(c.dst) || 0) + 1)
+    })
+    let best = null, bestCount = 0
+    peerCount.forEach((count, ip) => {
+      if (count > bestCount) { best = ip; bestCount = count }
+    })
+    return best ? { ip: best, count: bestCount } : null
+  })()
+  const recentAlerts = alertsRef.current.slice(-5).reverse()
+  const alertCount = alertsRef.current.length
+
   const analysisContent = {
     live: () => (
       <section className="analysisTab liveAnalysis">
         <div className="sourceSwitch" aria-label="Input source">
           <button className={activeSource === 'live' ? 'active' : ''} type="button" onClick={() => { setActiveSource('live'); setAppMode('live'); setReplayState('idle') }}>Live</button>
           <button className={activeSource === 'replay' ? 'active' : ''} type="button" onClick={() => { setActiveSource('replay'); setAppMode('replay') }}>PCAP Replay</button>
+        </div>
+
+        {/* Feature 4 — Protocol toggles */}
+        <div className="protocolToggles">
+          {['TCP','UDP','DNS','ARP','BCAST','MCAST','OTHER'].map(proto => (
+            <button
+              key={proto}
+              type="button"
+              className={activeProtocols.has(proto) ? 'active' : ''}
+              onClick={() => setActiveProtocols(prev => {
+                const next = new Set(prev)
+                next.has(proto) ? next.delete(proto) : next.add(proto)
+                return next
+              })}
+            >{proto}</button>
+          ))}
         </div>
 
         {activeSource === 'replay' && (
@@ -2140,7 +2581,6 @@ export default function App() {
                     {[0.25, 0.5, 1, 2, 4].map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
                   </select>
                 </div>
-                <input className="timeline" type="range" min="0" max={Math.max(replayMeta.duration, 0.1)} step="0.1" value={Math.min(replayTime, Math.max(replayMeta.duration, 0.1))} onChange={(event) => scrubReplay(event.target.value)} />
                 <p className="noteText">{replayIndex.toLocaleString()} of {replayPackets.length.toLocaleString()} packets replayed.</p>
               </>
             )}
@@ -2189,10 +2629,193 @@ export default function App() {
                 </div>
                 <button type="submit">Apply</button>
                 <button type="button" onClick={clearDisplayFilter}>Clear</button>
+                <div className="filterBarCheckpoints">
+                  <button type="button" className="cpSaveBtn" onClick={() => takeCheckpoint()}>Checkpoint</button>
+                  <button
+                    type="button"
+                    className={['cpHistoryBtn', checkpointPanelOpen ? 'active' : ''].filter(Boolean).join(' ')}
+                    onClick={() => setCheckpointPanelOpen(v => !v)}
+                  >
+                    History{checkpoints.length > 0 ? ` (${checkpoints.length})` : ''}
+                  </button>
+                </div>
                 {filterError && <p className="filterError">{filterError}</p>}
               </form>
             )}
+
+            {/* Feature 1 — Summary chips */}
+            {!screensaverActive && (
+              <div className="summaryChips">
+                {topTalker && (
+                  <button className="chip" type="button" onClick={() => setSelectedIp(topTalker.ip)}>
+                    Top Talker: <strong>{topTalker.ip}</strong>
+                  </button>
+                )}
+                {mostPeers && (
+                  <button className="chip" type="button" onClick={() => setSelectedIp(mostPeers.ip)}>
+                    Most Peers: <strong>{mostPeers.ip}</strong> ({mostPeers.count})
+                  </button>
+                )}
+                {alertCount > 0 && (
+                  <div className="chip chipAlert">
+                    Alerts: <strong>{alertCount}</strong>
+                    <div className="alertDropdown">
+                      {recentAlerts.map((a, i) => (
+                        <button key={i} type="button" onClick={() => setSelectedIp(a.ip)}>
+                          {a.label} — {a.ip}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Checkpoint history panel */}
+            {!screensaverActive && checkpointPanelOpen && (
+              <div className="checkpointPanel">
+                <div className="checkpointPanelHeader">
+                  <span>Checkpoints</span>
+                  <button type="button" onClick={() => setCheckpointPanelOpen(false)}>×</button>
+                </div>
+                <div className="checkpointList">
+                  {checkpoints.length === 0 && (
+                    <p className="cpEmpty">No checkpoints yet. Click "Checkpoint" to capture current network state.</p>
+                  )}
+                  {checkpoints.slice().reverse().map(cp => (
+                    <div key={cp.id} className={['checkpointItem', cp.type === 'auto' ? 'cpAuto' : ''].filter(Boolean).join(' ')}>
+                      <div className="cpMeta">
+                        <span className="cpLabel">{cp.label}</span>
+                        <span className="cpStats">{cp.nodeCount} hosts · {cp.edgeCount} edges</span>
+                        {cp.reason && <span className="cpReason">{cp.reason}</span>}
+                      </div>
+                      <div className="cpActions">
+                        <button type="button" onClick={() => computeDiff(cp.id, 'current')}>vs Now</button>
+                        <button type="button" onClick={() => setCheckpoints(prev => prev.filter(c => c.id !== cp.id))}>×</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Diff panel */}
+            {!screensaverActive && activeDiff && (
+              <div className="diffPanel">
+                <div className="diffHeader">
+                  <span className="diffTitle">Diff</span>
+                  <label className="diffOnlyToggle">
+                    <input type="checkbox" checked={diffMode} onChange={e => setDiffMode(e.target.checked)} />
+                    Diff only
+                  </label>
+                  <button type="button" className="diffClearBtn" onClick={clearDiff}>Clear</button>
+                </div>
+                <div className="diffCards">
+                  {activeDiff.result.summary.addedNodeCount > 0 &&
+                    <div className="diffCard added">+{activeDiff.result.summary.addedNodeCount} hosts</div>}
+                  {activeDiff.result.summary.removedNodeCount > 0 &&
+                    <div className="diffCard removed">−{activeDiff.result.summary.removedNodeCount} hosts</div>}
+                  {activeDiff.result.summary.addedEdgeCount > 0 &&
+                    <div className="diffCard added">+{activeDiff.result.summary.addedEdgeCount} convs</div>}
+                  {activeDiff.result.summary.removedEdgeCount > 0 &&
+                    <div className="diffCard removed">−{activeDiff.result.summary.removedEdgeCount} convs</div>}
+                  {activeDiff.result.summary.changedNodeCount > 0 &&
+                    <div className="diffCard changed">{activeDiff.result.summary.changedNodeCount} changed</div>}
+                </div>
+                <div className="diffLegend">
+                  <span className="diffLegendItem added">added</span>
+                  <span className="diffLegendItem changed">changed</span>
+                  <span className="diffLegendItem removed">removed</span>
+                </div>
+                <div className="diffDetails">
+                  {activeDiff.result.addedNodes.length > 0 && (
+                    <section className="diffSection">
+                      <h4>+ Added Hosts</h4>
+                      {activeDiff.result.addedNodes.map(n => (
+                        <button key={n.ip} type="button" className="diffNodeRow added" onClick={() => setSelectedIp(n.ip)}>
+                          <span className="diffIp">{n.ip}</span>
+                          <span className="diffKind">{n.kind}</span>
+                        </button>
+                      ))}
+                    </section>
+                  )}
+                  {activeDiff.result.removedNodes.length > 0 && (
+                    <section className="diffSection">
+                      <h4>− Removed Hosts</h4>
+                      {activeDiff.result.removedNodes.map(n => (
+                        <div key={n.ip} className="diffNodeRow removed">
+                          <span className="diffIp">{n.ip}</span>
+                          <span className="diffKind">{n.kind}</span>
+                        </div>
+                      ))}
+                    </section>
+                  )}
+                  {activeDiff.result.changedNodes.length > 0 && (
+                    <section className="diffSection">
+                      <h4>Changed Hosts</h4>
+                      {activeDiff.result.changedNodes.slice(0, 10).map(n => (
+                        <button key={n.ip} type="button" className="diffNodeRow changed" onClick={() => setSelectedIp(n.ip)}>
+                          <span className="diffIp">{n.ip}</span>
+                          <span className="diffDelta">{fmtBytes(n.bytesDelta)}</span>
+                          <span className="diffReasonChip">{n.reason}</span>
+                        </button>
+                      ))}
+                    </section>
+                  )}
+                  {activeDiff.result.addedEdges.length > 0 && (
+                    <section className="diffSection">
+                      <h4>+ Added Conversations</h4>
+                      {activeDiff.result.addedEdges.slice(0, 10).map((e, i) => (
+                        <div key={i} className="diffEdgeRow added">
+                          <span>{e.src}</span>
+                          <span className="diffArrow">→</span>
+                          <span>{e.dst}</span>
+                          {e.isExternal && <span className="diffExtBadge">ext</span>}
+                        </div>
+                      ))}
+                    </section>
+                  )}
+                  {activeDiff.result.removedEdges.length > 0 && (
+                    <section className="diffSection">
+                      <h4>− Removed Conversations</h4>
+                      {activeDiff.result.removedEdges.slice(0, 10).map((e, i) => (
+                        <div key={i} className="diffEdgeRow removed">
+                          <span>{e.src}</span>
+                          <span className="diffArrow">→</span>
+                          <span>{e.dst}</span>
+                        </div>
+                      ))}
+                    </section>
+                  )}
+                  {activeDiff.result.protocolDeltas.length > 0 && (
+                    <section className="diffSection">
+                      <h4>Protocol Shifts</h4>
+                      {activeDiff.result.protocolDeltas.slice(0, 8).map(d => (
+                        <div key={d.proto} className="diffProtoRow">
+                          <span className="diffProto">{d.proto}</span>
+                          <span className={d.pktsDelta > 0 ? 'diffPos' : 'diffNeg'}>
+                            {d.pktsDelta > 0 ? '+' : ''}{d.pktsDelta} pkts
+                          </span>
+                          <span className={d.pctChange > 0 ? 'diffPos' : 'diffNeg'}>
+                            {d.pctChange > 0 ? '+' : ''}{d.pctChange}%
+                          </span>
+                        </div>
+                      ))}
+                    </section>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div ref={mountRef} className="canvasMount" />
+            {diffReasonTooltip && (
+              <div
+                className="diffTooltip"
+                style={{ left: diffReasonTooltip.x + 14, top: diffReasonTooltip.y - 10 }}
+              >
+                {diffReasonTooltip.text}
+              </div>
+            )}
             {screensaverActive && (
               <div
                 onClick={() => setScreensaverActive(false)}
@@ -2222,6 +2845,113 @@ export default function App() {
 
             {!screensaverActive && analysisContent[activeTab]?.()}
 
+            {/* Right panel — inspection drawer (node detail) or top talkers */}
+            {!screensaverActive && (
+              <aside className={['inspectionDrawer', (selectedIp || rightPanelOpen) ? 'open' : ''].filter(Boolean).join(' ')}>
+                {selectedIp ? (
+                  <>
+                    <div className="inspectionHeader">
+                      <span className="inspectionIp">{selectedIp}</span>
+                      <button type="button" className="inspectionClose" onClick={() => setSelectedIp(null)}>×</button>
+                    </div>
+                    <div className="inspectionTabs">
+                      {['overview','peers','protocols','packets'].map(tab => (
+                        <button key={tab} type="button" className={drawerTab === tab ? 'active' : ''} onClick={() => setDrawerTab(tab)}>
+                          {tab}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="inspectionBody">
+                      {drawerTab === 'overview' && (() => {
+                        const ep = trafficAnalysis.endpoints.find(e => e.ip === selectedIp)
+                        return ep ? (
+                          <>
+                            <dl className="inspectionDl">
+                              <div><dt>IP</dt><dd>{ep.ip}</dd></div>
+                              <div><dt>Type</dt><dd>{classifyIp(ep.ip)}</dd></div>
+                              {ep.mac && <div><dt>MAC</dt><dd>{ep.mac}</dd></div>}
+                              <div><dt>Bytes</dt><dd>{fmtBytes(ep.bytes)}</dd></div>
+                              <div><dt>Packets</dt><dd>{ep.packets.toLocaleString()}</dd></div>
+                              <div><dt>Protocols</dt><dd>{[...ep.protocols].join(', ')}</dd></div>
+                            </dl>
+                            <button
+                              type="button"
+                              className="copyFilterBtn"
+                              onClick={() => navigator.clipboard?.writeText(`ip.addr == ${ep.ip}`)}
+                            >
+                              Copy Wireshark Filter
+                            </button>
+                          </>
+                        ) : <p className="inspectionEmpty">No data yet.</p>
+                      })()}
+                      {drawerTab === 'peers' && (() => {
+                        const peers = trafficAnalysis.conversations.filter(c => c.src === selectedIp || c.dst === selectedIp)
+                        return peers.length ? (
+                          <ul className="inspectionList">
+                            {peers.slice(0, 40).map((c, i) => {
+                              const peer = c.src === selectedIp ? c.dst : c.src
+                              return (
+                                <li key={i}>
+                                  <button type="button" onClick={() => setSelectedIp(peer)}>{peer}</button>
+                                  <span>{c.bytes.toLocaleString()} B</span>
+                                </li>
+                              )
+                            })}
+                          </ul>
+                        ) : <p className="inspectionEmpty">No conversations yet.</p>
+                      })()}
+                      {drawerTab === 'protocols' && (() => {
+                        const ep = trafficAnalysis.endpoints.find(e => e.ip === selectedIp)
+                        const protos = ep ? [...ep.protocols] : []
+                        return protos.length ? (
+                          <ul className="inspectionList">
+                            {protos.map(p => <li key={p}><span>{p}</span></li>)}
+                          </ul>
+                        ) : <p className="inspectionEmpty">No protocol data.</p>
+                      })()}
+                      {drawerTab === 'packets' && (() => {
+                        const pkts = filteredPackets.filter(p => p.src === selectedIp || p.dst === selectedIp).slice(-60).reverse()
+                        return pkts.length ? (
+                          <ul className="inspectionList inspectionPackets">
+                            {pkts.map((p, i) => (
+                              <li key={i}>
+                                <span className="pktProto">{p.proto || 'OTHER'}</span>
+                                <span>{p.src === selectedIp ? '→' : '←'} {p.src === selectedIp ? p.dst : p.src}</span>
+                                <span>{p.size || 0}B</span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : <p className="inspectionEmpty">No packets yet.</p>
+                      })()}
+                    </div>
+                  </>
+                ) : rightPanelOpen ? (
+                  /* Top Talkers view (default when no node selected) */
+                  <>
+                    <div className="inspectionHeader">
+                      <span className="inspectionIp" style={{ color: 'var(--text-dim)' }}>Top Talkers</span>
+                      <button type="button" className="inspectionClose" onClick={() => setRightPanelOpen(false)}>×</button>
+                    </div>
+                    <div className="inspectionBody">
+                      {trafficAnalysis.endpoints.length === 0 ? (
+                        <p className="inspectionEmpty">No traffic yet.</p>
+                      ) : (
+                        <ul className="inspectionList">
+                          {trafficAnalysis.endpoints.slice(0, 20).map((ep, i) => (
+                            <li key={ep.ip}>
+                              <span style={{ color: 'var(--text-dimmer)', minWidth: 20, flexShrink: 0 }}>#{i + 1}</span>
+                              <button type="button" onClick={() => setSelectedIp(ep.ip)}>{ep.ip}</button>
+                              <span>{fmtBytes(ep.bytes)}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </>
+                ) : null}
+              </aside>
+            )}
+
             <section className="graphToolbar liveGraphToolbar" aria-label="Graph controls" style={{ display: screensaverActive ? 'none' : undefined }}>
               <button
                 type="button"
@@ -2230,12 +2960,37 @@ export default function App() {
               >
                 {gesturesEnabled ? '✋ ON' : '✋ Gestures'}
               </button>
+              <button
+                type="button"
+                style={{ color: rightPanelOpen && !selectedIp ? 'var(--accent)' : undefined }}
+                onClick={() => { setRightPanelOpen(v => !v); setSelectedIp(null) }}
+              >
+                {rightPanelOpen && !selectedIp ? 'Hide Panel' : 'Top Talkers'}
+              </button>
             </section>
 
             {selectedIp && (
               <button className="wholeNetworkButton" type="button" onClick={() => setSelectedIp(null)}>
                 Whole network
               </button>
+            )}
+
+            {/* Feature 3 — Bottom timeline strip */}
+            {!screensaverActive && (
+              <div className="timelineStrip">
+                <canvas ref={sparklineRef} className="sparkline" width="600" height="44" />
+                {activeSource === 'replay' && replayMeta && (
+                  <input
+                    className="timelineScrubber"
+                    type="range"
+                    min="0"
+                    max={Math.max(replayMeta.duration, 0.1)}
+                    step="0.1"
+                    value={Math.min(replayTime, Math.max(replayMeta.duration, 0.1))}
+                    onChange={(event) => scrubReplay(event.target.value)}
+                  />
+                )}
+              </div>
             )}
           </section>
         </div>

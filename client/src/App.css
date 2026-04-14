@@ -240,7 +240,7 @@ button { font: inherit; }
 
 .liveViewport .canvasMount {
   top: 0;
-  bottom: 0;
+  bottom: 48px;
   left: 0;
   right: 0;
   border: none;
@@ -264,7 +264,7 @@ button { font: inherit; }
   left: 0;
   z-index: 4;
   display: grid;
-  grid-template-columns: auto minmax(220px, 1fr) auto auto;
+  grid-template-columns: auto minmax(160px, 1fr) auto auto auto;
   align-items: center;
   gap: 8px;
   height: 48px;
@@ -1473,6 +1473,327 @@ h1, h2, p { overflow-wrap: anywhere; }
   padding: 8px;
 }
 
+/* ── Feature 4 — Protocol toggles ─────────────────────── */
+
+.protocolToggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 0 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.protocolToggles button {
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dimmer);
+  cursor: pointer;
+  font: inherit;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  transition: border-color 0.1s, background 0.1s, color 0.1s;
+}
+
+.protocolToggles button.active {
+  border-color: var(--accent);
+  background: rgba(129, 140, 248, 0.15);
+  color: var(--accent);
+}
+
+/* ── Feature 1 — Summary chips ─────────────────────────── */
+
+.summaryChips {
+  position: absolute;
+  top: 48px;
+  left: 208px;
+  right: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  pointer-events: none;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--border-bright);
+  border-radius: 999px;
+  background: rgba(4, 4, 10, 0.82);
+  color: var(--text-dim);
+  font: inherit;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.62rem;
+  font-weight: 400;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: border-color 0.12s, color 0.12s;
+}
+
+.chip:hover { border-color: var(--accent); color: var(--text); }
+
+.chip strong { font-weight: 600; color: var(--text); }
+
+.chipAlert {
+  position: relative;
+  border-color: rgba(251, 146, 60, 0.5);
+  color: rgba(251, 146, 60, 0.9);
+}
+
+.chipAlert strong { color: rgba(251, 146, 60, 1); }
+
+.alertDropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 10;
+  display: none;
+  flex-direction: column;
+  min-width: 220px;
+  border: 1px solid var(--border-bright);
+  border-radius: 8px;
+  background: var(--panel-bg-deep);
+  backdrop-filter: blur(20px);
+  overflow: hidden;
+}
+
+.chipAlert:hover .alertDropdown { display: flex; }
+
+.alertDropdown button {
+  width: 100%;
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.68rem;
+  text-align: left;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+
+.alertDropdown button:last-child { border-bottom: none; }
+.alertDropdown button:hover { background: var(--surface2); color: var(--text); }
+
+/* ── Feature 3 — Bottom timeline strip ─────────────────── */
+
+.timelineStrip {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 4;
+  height: 48px;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  border-top: 1px solid var(--border);
+  background: rgba(4, 4, 10, 0.88);
+  backdrop-filter: blur(20px);
+}
+
+.sparkline {
+  flex: 1;
+  height: 100%;
+  display: block;
+  min-width: 0;
+}
+
+.timelineScrubber {
+  flex: 0 0 220px;
+  margin: 0 12px;
+  align-self: center;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ── Feature 2 — Inspection drawer ─────────────────────── */
+
+.inspectionDrawer {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  bottom: 48px;
+  z-index: 5;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: rgba(4, 4, 10, 0.94);
+  backdrop-filter: blur(24px);
+  transform: translateX(100%);
+  transition: transform 0.18s ease;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.inspectionDrawer.open {
+  transform: translateX(0);
+  pointer-events: auto;
+}
+
+.inspectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.inspectionIp {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspectionClose {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 1.2rem;
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.inspectionClose:hover { color: var(--text); }
+
+.inspectionTabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.inspectionTabs button {
+  flex: 1;
+  height: 32px;
+  border: none;
+  border-right: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dimmer);
+  cursor: pointer;
+  font: inherit;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: color 0.1s, background 0.1s;
+}
+
+.inspectionTabs button:last-child { border-right: none; }
+
+.inspectionTabs button.active {
+  background: rgba(129, 140, 248, 0.1);
+  color: var(--accent);
+  border-bottom: 2px solid var(--accent);
+}
+
+.inspectionBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.inspectionDl {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+}
+
+.inspectionDl div {
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.68rem;
+}
+
+.inspectionDl dt { color: var(--text-dimmer); }
+.inspectionDl dd { color: var(--text); margin: 0; overflow-wrap: anywhere; }
+
+.inspectionList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.inspectionList li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.65rem;
+  border: 1px solid transparent;
+}
+
+.inspectionList li:hover { border-color: var(--border); background: var(--surface); }
+
+.inspectionList button {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.65rem;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inspectionList button:hover { text-decoration: underline; }
+
+.inspectionList span { color: var(--text-dimmer); flex-shrink: 0; }
+
+.inspectionPackets .pktProto {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(129,140,248,0.15);
+  color: var(--accent);
+  font-size: 0.58rem;
+  font-weight: 600;
+}
+
+.inspectionEmpty {
+  color: var(--text-dimmer);
+  font-size: 0.7rem;
+  margin: 0;
+  padding: 8px 0;
+}
+
 /* ── Responsive ────────────────────────────────────────── */
 
 @media (max-width: 1280px) {
@@ -1510,6 +1831,423 @@ h1, h2, p { overflow-wrap: anywhere; }
 @media (max-width: 760px) {
   .statsGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metricGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* ── Phase 1: Checkpoint buttons in filter bar ─────────── */
+
+.filterBarCheckpoints {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.cpSaveBtn, .cpHistoryBtn {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.cpSaveBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cpHistoryBtn:hover, .cpHistoryBtn.active {
+  border-color: var(--accent);
+  background: rgba(129, 140, 248, 0.1);
+  color: var(--accent);
+}
+
+/* ── Checkpoint history panel ───────────────────────────── */
+
+.checkpointPanel {
+  position: absolute;
+  top: 48px;
+  left: 0;
+  z-index: 8;
+  width: 260px;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-bright);
+  border-top: none;
+  border-radius: 0 0 8px 0;
+  background: var(--panel-bg-deep);
+  backdrop-filter: blur(24px);
+  overflow: hidden;
+  box-shadow: 4px 8px 32px rgba(0,0,0,0.5);
+}
+
+.checkpointPanelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.checkpointPanelHeader button {
+  border: none;
+  background: transparent;
+  color: var(--text-dimmer);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.checkpointPanelHeader button:hover { color: var(--text); }
+
+.checkpointList {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.cpEmpty {
+  color: var(--text-dimmer);
+  font-size: 0.7rem;
+  padding: 12px 14px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.checkpointItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  transition: background 0.1s;
+}
+
+.checkpointItem:hover { background: var(--surface); }
+
+.checkpointItem.cpAuto {
+  border-left: 2px solid rgba(251, 191, 36, 0.5);
+  padding-left: 10px;
+}
+
+.cpMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.cpLabel {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cpStats {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.58rem;
+  color: var(--text-dimmer);
+}
+
+.cpReason {
+  font-size: 0.58rem;
+  color: var(--yellow);
+  font-style: italic;
+}
+
+.cpActions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.cpActions button {
+  height: 22px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.6rem;
+  transition: border-color 0.1s, color 0.1s;
+}
+
+.cpActions button:first-child:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cpActions button:last-child:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* ── Diff panel ─────────────────────────────────────────── */
+
+.diffPanel {
+  position: absolute;
+  top: 84px;
+  left: 208px;
+  z-index: 6;
+  width: 300px;
+  max-height: calc(100% - 148px);
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-bright);
+  border-radius: 8px;
+  background: rgba(4, 4, 10, 0.96);
+  backdrop-filter: blur(24px);
+  overflow: hidden;
+  box-shadow: 4px 8px 32px rgba(0,0,0,0.6);
+}
+
+.diffHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.diffTitle {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  flex: 1;
+}
+
+.diffOnlyToggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.diffClearBtn {
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.6rem;
+  flex-shrink: 0;
+  transition: border-color 0.1s, color 0.1s;
+}
+
+.diffClearBtn:hover { border-color: var(--red); color: var(--red); }
+
+.diffCards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.diffCard {
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.diffCard.added   { background: rgba(52, 211, 153, 0.12); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.3); }
+.diffCard.removed { background: rgba(248, 113, 113, 0.12); color: #f87171; border: 1px solid rgba(248, 113, 113, 0.3); }
+.diffCard.changed { background: rgba(251, 191, 36, 0.12); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.3); }
+
+.diffDetails {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.diffSection h4 {
+  margin: 0 0 5px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.6rem;
+  font-weight: 600;
+  color: var(--text-dimmer);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.diffNodeRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.68rem;
+  margin-bottom: 2px;
+}
+
+button.diffNodeRow { cursor: pointer; }
+button.diffNodeRow:hover { background: var(--surface2); }
+
+.diffNodeRow.added   { color: #34d399; }
+.diffNodeRow.removed { color: #f87171; }
+.diffNodeRow.changed { color: var(--text); }
+
+.diffIp   { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diffKind { color: var(--text-dimmer); font-size: 0.6rem; flex-shrink: 0; }
+.diffDelta { font-weight: 600; flex-shrink: 0; min-width: 58px; text-align: right; font-size: 0.65rem; }
+.diffReason { color: var(--text-dimmer); font-style: italic; font-size: 0.6rem; flex-shrink: 0; }
+
+.diffReasonChip {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(251, 191, 36, 0.12);
+  color: #fbbf24;
+  font-size: 0.58rem;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+}
+
+.diffLegend {
+  display: flex;
+  gap: 6px;
+  padding: 4px 8px 2px;
+  border-top: 1px solid var(--border);
+  margin-top: 2px;
+}
+
+.diffLegendItem {
+  font-size: 0.6rem;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-weight: 500;
+}
+.diffLegendItem.added   { background: rgba(52, 211, 153, 0.12); color: #34d399; }
+.diffLegendItem.changed { background: rgba(251, 191, 36, 0.12); color: #fbbf24; }
+.diffLegendItem.removed { background: rgba(248, 113, 113, 0.12); color: #f87171; }
+
+.diffTooltip {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(18, 18, 22, 0.92);
+  border: 1px solid var(--border-bright);
+  color: var(--text);
+  font-size: 0.7rem;
+  white-space: nowrap;
+  backdrop-filter: blur(6px);
+}
+
+.diffEdgeRow {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.62rem;
+  margin-bottom: 2px;
+  overflow: hidden;
+}
+
+.diffEdgeRow.added   { color: #34d399; }
+.diffEdgeRow.removed { color: #f87171; opacity: 0.7; }
+
+.diffArrow { color: var(--text-dimmer); flex-shrink: 0; }
+
+.diffExtBadge {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+  font-size: 0.56rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+}
+
+.diffProtoRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.65rem;
+  margin-bottom: 2px;
+}
+
+.diffProto { flex: 1; color: var(--text-dim); }
+.diffPos { color: #34d399; }
+.diffNeg { color: #f87171; }
+
+/* ── Wireshark copy filter button ───────────────────────── */
+
+.copyFilterBtn {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  height: 28px;
+  border: 1px solid var(--border-bright);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.62rem;
+  font-weight: 500;
+  transition: border-color 0.12s, color 0.12s, background 0.12s;
+}
+
+.copyFilterBtn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(129, 140, 248, 0.08);
 }
 
 @media (prefers-reduced-motion: reduce) {
