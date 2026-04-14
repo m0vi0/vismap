@@ -4,7 +4,7 @@ PacMap is a graph-first network traffic visualizer for live capture and PCAP rep
 
 Think of it as Git for network behavior: snapshot, diff, and replay network state visually.
 
-![pacmap demo](demo.gif)
+![pacmap demo](OUTPUT.gif)
 
 ## Input Modes
 
