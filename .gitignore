@@ -30,3 +30,6 @@ CLAUDE.md
 .agents/
 .agents
 v3.mov
+
+*.mov
+*.mp4
