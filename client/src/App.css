@@ -436,7 +436,7 @@ button { font: inherit; }
   top: 56px;
   bottom: auto;
   left: 0;
-  width: auto;
+  width: 200px;
   overflow: visible;
 }
 
@@ -1479,8 +1479,8 @@ h1, h2, p { overflow-wrap: anywhere; }
   .appFrame { grid-template-columns: 180px minmax(0, 1fr); }
   .analysisViewport .analysisTab { width: 400px; }
   .analysisViewport .canvasMount { left: 416px; }
-  .liveViewport .analysisTab { width: 340px; }
-  .liveViewport .canvasMount { left: 356px; }
+  .liveViewport .analysisTab { width: 200px; }
+  .liveViewport .canvasMount { left: 216px; }
   .liveGraphToolbar { right: 14px; left: auto; }
 }
 

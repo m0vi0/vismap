@@ -819,6 +819,9 @@ export default function App() {
   const resetGraphRef = useRef(null)
   const snapshotGraphRef = useRef(null)
   const rebuildGraphRef = useRef(null)
+  const lastIngestedReplayIndexRef = useRef(0)
+  const replayIndexRef = useRef(0)
+  const replayPacketsRef = useRef([])
 
   const [gesturesEnabled, setGesturesEnabled] = useState(false)
   const gestureCleanupRef = useRef(null)
@@ -880,7 +883,6 @@ export default function App() {
   )
 
   const trafficAnalysis = analysisSnapshot
-  const replayGraphBucket = activeSource === 'replay' ? Math.floor(replayTime * 8) : 0
 
   useEffect(() => {
     selectedIpRef.current = selectedIp
@@ -905,6 +907,9 @@ export default function App() {
   useEffect(() => {
     filteredPacketsRef.current = filteredPackets
   }, [filteredPackets])
+
+  useEffect(() => { replayIndexRef.current = replayIndex }, [replayIndex])
+  useEffect(() => { replayPacketsRef.current = replayPackets }, [replayPackets])
 
   useEffect(() => {
     if (analysisSnapshotTimerRef.current !== null) return undefined
@@ -1869,6 +1874,7 @@ export default function App() {
     if (!rebuildGraphRef.current) return
     if (activeSource === 'replay') {
       rebuildGraphRef.current(filteredPacketsRef.current)
+      lastIngestedReplayIndexRef.current = replayIndexRef.current
       return
     }
 
@@ -1877,7 +1883,31 @@ export default function App() {
       graphRebuildTimerRef.current = null
       rebuildGraphRef.current?.(filteredPacketsRef.current)
     }, LIVE_GRAPH_REBUILD_MS)
-  }, [activeFilter, activeSource, replayGraphBucket])
+  }, [activeFilter, activeSource])
+
+  useEffect(() => {
+    if (activeSource !== 'replay') return
+    if (!ingestPacketRef.current || !rebuildGraphRef.current) return
+
+    const from = lastIngestedReplayIndexRef.current
+    const to = replayIndex
+
+    const SEEK_THRESHOLD = 500
+    if (to < from || to > from + SEEK_THRESHOLD) {
+      rebuildGraphRef.current(filteredPacketsRef.current)
+      lastIngestedReplayIndexRef.current = to
+      return
+    }
+
+    const allPackets = replayPacketsRef.current
+    for (let i = from; i < to && i < allPackets.length; i++) {
+      const pkt = allPackets[i]
+      if (packetMatchesFilter(pkt, activeFilterRef.current)) {
+        ingestPacketRef.current(pkt)
+      }
+    }
+    lastIngestedReplayIndexRef.current = to
+  }, [replayIndex, activeSource])
 
   useEffect(() => {
     if (selectedPacketId && !filteredPackets.some((packet) => packet.id === selectedPacketId)) {
@@ -1977,7 +2007,7 @@ export default function App() {
         duration: parsed.duration,
         linkTypes: parsed.linkTypes || [],
       })
-      setReplayState(parsed.packets.length ? 'paused' : 'idle')
+      setReplayState(parsed.packets.length ? 'playing' : 'idle')
       if (!parsed.packets.length) {
         const linkTypes = parsed.linkTypes?.length
           ? parsed.linkTypes.map(linkTypeLabel).join(', ')
