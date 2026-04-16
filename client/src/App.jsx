@@ -108,6 +108,17 @@ function parseDisplayFilter(expression) {
   const raw = expression.trim()
   if (!raw) return { raw, type: 'all' }
 
+  // Compound AND: split on &&, parse each part independently
+  if (raw.includes('&&')) {
+    const parts = raw.split('&&').map(p => p.trim())
+    const parsed = parts.map(part => {
+      const result = parseDisplayFilter(part)
+      if (result.type === 'all' || result.type === 'compound') throw new Error('Invalid compound filter part: ' + part)
+      return result
+    })
+    return { raw, type: 'compound', parts: parsed }
+  }
+
   const lower = raw.toLowerCase()
   if (['tcp', 'udp', 'dns', 'http', 'arp', 'other'].includes(lower)) {
     return { raw, type: 'protocol', value: lower.toUpperCase() }
@@ -128,6 +139,7 @@ function parseDisplayFilter(expression) {
 
 function packetMatchesFilter(packet, filter) {
   if (!filter || filter.type === 'all') return true
+  if (filter.type === 'compound') return filter.parts.every(p => packetMatchesFilter(packet, p))
   const proto = String(packet.proto || '').toUpperCase()
   const src = packet.srcIp || packet.src
   const dst = packet.dstIp || packet.dst
@@ -146,6 +158,41 @@ function packetMatchesFilter(packet, filter) {
   if (filter.field === 'udp.port') return proto === 'UDP' && (srcPort === filter.value || dstPort === filter.value)
   if (filter.field === 'port') return srcPort === filter.value || dstPort === filter.value
   return true
+}
+
+// Returns {src, dst} if filter is a compound containing both ip.src and ip.dst parts; else null.
+function extractPathEndpoints(filter) {
+  if (!filter || filter.type !== 'compound') return null
+  const srcPart = filter.parts.find(p => p.field === 'ip.src')
+  const dstPart = filter.parts.find(p => p.field === 'ip.dst')
+  if (srcPart && dstPart) return { src: srcPart.value, dst: dstPart.value }
+  return null
+}
+
+// Pure BFS over adjacency Map<string, Set<string>>. Returns IP array (shortest path) or null.
+function bfsPath(src, dst, adjacency) {
+  if (!adjacency.has(src) || !adjacency.has(dst)) return null
+  if (src === dst) return [src]
+  const queue = [[src]]
+  const visited = new Set([src])
+  while (queue.length) {
+    const path = queue.shift()
+    const node = path[path.length - 1]
+    for (const neighbor of (adjacency.get(node) || [])) {
+      if (neighbor === dst) return [...path, neighbor]
+      if (!visited.has(neighbor)) {
+        visited.add(neighbor)
+        queue.push([...path, neighbor])
+      }
+    }
+  }
+  return null
+}
+
+function formatBytes(b) {
+  if (b >= 1048576) return `${(b / 1048576).toFixed(1)}MB`
+  if (b >= 1024) return `${(b / 1024).toFixed(1)}KB`
+  return `${b}B`
 }
 
 function packetInfo(packet) {
@@ -708,6 +755,36 @@ function buildTrafficAnalysis(packets, replayMeta, conversationSort = 'bytes') {
   }
 }
 
+/**
+ * Serialize a packet array into a checkpoint-compatible snapshot.
+ * Used for time-window comparison. Pure — no side effects.
+ */
+function buildWindowSnapshot(packets) {
+  const analysis = buildTrafficAnalysis(packets, null, 'bytes')
+  const nodeMap = new Map(analysis.endpoints.map(ep =>
+    [ep.ip, { bytes: ep.bytes, packets: ep.packets, mac: ep.mac || '' }]
+  ))
+  const edgeMap = new Map()
+  analysis.conversations.forEach(conv => {
+    const key = [conv.src, conv.dst].sort().join('<->')
+    if (!edgeMap.has(key)) edgeMap.set(key, { src: conv.src, dst: conv.dst, bytes: conv.bytes, packets: conv.packets })
+  })
+  return serializeCheckpoint(nodeMap, edgeMap, analysis)
+}
+
+function formatReplayTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00'
+  const m = Math.floor(seconds / 60)
+  const s = Math.floor(seconds % 60)
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+function formatWindowDuration(range) {
+  const d = range.end - range.start
+  if (d < 60) return `${d.toFixed(0)}s`
+  return `${(d / 60).toFixed(1)}min`
+}
+
 function makeTextSprite(text) {
   const canvas = document.createElement('canvas')
   canvas.width = 768
@@ -912,9 +989,6 @@ export default function App() {
   // Feature 6 — DNS zone tracking
   const dnsServerIpsRef = useRef(new Set())
 
-  // Feature 3 — sparkline canvas
-  const sparklineRef = useRef(null)
-
   // ── Phase 1: Checkpoint + Diff system ──────────────────────
 
   const [checkpoints, setCheckpoints] = useState(() => {
@@ -923,10 +997,59 @@ export default function App() {
   })
   const [checkpointPanelOpen, setCheckpointPanelOpen] = useState(false)
   const [activeDiff, setActiveDiff] = useState(null)
+
+  // Checkpoint label UI state
+  const [pendingLabel, setPendingLabel] = useState('')
+  const [labelingOpen, setLabelingOpen] = useState(false)
+  const [editingCpId, setEditingCpId] = useState(null)
+  const [editingCpLabel, setEditingCpLabel] = useState('')
+
+  // Auto-checkpoint mode
+  const [autoCheckpointMode, setAutoCheckpointMode] = useState('off')
+  const autoCheckpointModeRef = useRef('off')
+
+  // Live change feed
+  const [changeFeed, setChangeFeed] = useState([])
+  const [feedOpen, setFeedOpen] = useState(false)
+  const feedQueueRef = useRef([])
+  const pushFeedEventRef = useRef(null)
+
   // activeDiff shape: { baseId: string|'current', compareId: string|'current', result: DiffResult } | null
   const [diffMode, setDiffMode] = useState(false)  // "Diff Only" toggle
   const [diffReasonTooltip, setDiffReasonTooltip] = useState(null) // { ip, x, y, text } | null
   const [rightPanelOpen, setRightPanelOpen] = useState(true)
+
+  // Path trace: activates when filter contains both ip.src and ip.dst
+  const [pathTrace, setPathTrace] = useState(null)
+  const pathTraceRef = useRef(null)
+  const [liveAnalysisCollapsed, setLiveAnalysisCollapsed] = useState(false)
+
+  // Reference Snapshot — pointer to one checkpoint ID, persisted
+  const [referenceId, setReferenceId] = useState(() =>
+    localStorage.getItem('pacmap_reference_id') || null
+  )
+
+  // Traffic De-emphasis — view-layer-only opacity reduction for BCAST/MCAST
+  const [deemphasizeGroups, setDeemphasizeGroups] = useState(new Set())
+  const deemphasizeGroupsRef = useRef(new Set())
+
+  // ── Time Window ──────────────────────────────────────────────
+  // null = full data; replay: relative seconds (0–duration); live: absolute unix seconds
+  const [liveTime, setLiveTime] = useState(null)   // null = live edge; live mode history scrubber
+  const liveTimeRef = useRef(null)
+  const windowDiffResultRef = useRef(null)
+  const [timeRange, setTimeRange] = useState(null)
+  const timeRangeRef = useRef(null) // sync for WebSocket closure gating
+  const [windowCompareActive, setWindowCompareActive] = useState(false)
+  const windowRebuildTimerRef = useRef(null)
+  const trackRef = useRef(null)
+  const dragStateRef = useRef({
+    mode: null,  // 'playhead' | 'windowLeft' | 'windowRight' | 'windowBody' | 'drawing' | 'playheadOrDraw'
+    startTime: 0,
+    startWindowStart: 0,
+    startWindowEnd: 0,
+    movedEnough: false,
+  })
 
   // Bridge refs — assigned inside Three.js useEffect closure (where nodeStore/edgeStore live)
   const applyDiffStateRef = useRef(null)
@@ -949,6 +1072,20 @@ export default function App() {
     localStorage.setItem('pacmap_checkpoints', JSON.stringify(checkpoints.slice(-50)))
   }, [checkpoints])
 
+  // Persist reference ID to localStorage
+  useEffect(() => {
+    if (referenceId) localStorage.setItem('pacmap_reference_id', referenceId)
+    else localStorage.removeItem('pacmap_reference_id')
+  }, [referenceId])
+
+  // Sync deemphasizeGroups to ref for Three.js animation loop
+  useEffect(() => {
+    deemphasizeGroupsRef.current = deemphasizeGroups
+  }, [deemphasizeGroups])
+
+  // Sync pathTrace to ref for Three.js animation loop
+  useEffect(() => { pathTraceRef.current = pathTrace }, [pathTrace])
+
   const sourcePackets = useMemo(() => {
     if (activeSource === 'replay') return replayPackets.slice(Math.max(0, replayIndex - ANALYSIS_PACKET_WINDOW), replayIndex)
     return livePackets.slice(-ANALYSIS_PACKET_WINDOW)
@@ -961,6 +1098,114 @@ export default function App() {
       return packetMatchesFilter(packet, activeFilter)
     })
   }, [activeFilter, sourcePackets, activeProtocols])
+
+  // All packets available regardless of replay-index window (for time-range filtering)
+  const allAvailablePackets = activeSource === 'replay' ? replayPackets : livePackets
+
+  // Path trace: BFS over full captured graph when filter contains both ip.src and ip.dst.
+  // Uses allAvailablePackets (not filteredPackets) so intermediate hops not excluded by the IP filter.
+  useEffect(() => {
+    const endpoints = extractPathEndpoints(activeFilter)
+    if (!endpoints) {
+      setPathTrace(null)
+      return
+    }
+    const { src, dst } = endpoints
+    const pkts = activeSource === 'replay' ? replayPackets : livePackets
+
+    const adjacency = new Map()
+    const edgeStats = new Map()
+    for (const pkt of pkts) {
+      const a = pkt.srcIp || pkt.src
+      const b = pkt.dstIp || pkt.dst
+      if (!a || !b || a === b) continue
+      if (!adjacency.has(a)) adjacency.set(a, new Set())
+      if (!adjacency.has(b)) adjacency.set(b, new Set())
+      adjacency.get(a).add(b)
+      adjacency.get(b).add(a)
+      const key = edgeKey(a, b)
+      if (!edgeStats.has(key)) edgeStats.set(key, { packets: 0, bytes: 0 })
+      const s = edgeStats.get(key)
+      s.packets++
+      s.bytes += pkt.size || 0
+    }
+
+    const pathIps = bfsPath(src, dst, adjacency)
+    if (!pathIps) {
+      setPathTrace({ src, dst, found: false, hops: [], pathIps: [], pathEdgeKeys: new Set() })
+      return
+    }
+
+    const hops = []
+    const pathEdgeKeys = new Set()
+    for (let i = 0; i < pathIps.length - 1; i++) {
+      const a = pathIps[i], b = pathIps[i + 1]
+      const key = edgeKey(a, b)
+      pathEdgeKeys.add(key)
+      const s = edgeStats.get(key) ?? { packets: 0, bytes: 0 }
+      hops.push({ src: a, dst: b, packets: s.packets, bytes: s.bytes })
+    }
+    setPathTrace({ src, dst, found: true, hops, pathIps, pathEdgeKeys })
+  }, [activeFilter, activeSource, livePackets, replayPackets])
+
+  // Coordinate bounds for the timeline range slider
+  const timelineBounds = useMemo(() => {
+    if (activeSource === 'replay' && replayMeta) return { min: 0, max: replayMeta.duration }
+    if (livePackets.length > 1) {
+      let min = Infinity, max = -Infinity
+      livePackets.forEach(p => { if (p.timestamp < min) min = p.timestamp; if (p.timestamp > max) max = p.timestamp })
+      return min < max ? { min, max } : null
+    }
+    return null
+  }, [activeSource, replayMeta, livePackets])
+
+  // Active scrubber position: clamped to window if one exists
+  const activeScrubberTime = useMemo(() => {
+    const raw = activeSource === 'replay'
+      ? replayTime
+      : (liveTime ?? timelineBounds?.max ?? null)
+    if (raw === null) return null
+    if (timeRange) return Math.max(timeRange.start, Math.min(timeRange.end, raw))
+    return raw
+  }, [activeSource, replayTime, liveTime, timeRange, timelineBounds])
+
+  // Packets filtered to the selected time window (+ protocol + text filter)
+  const windowPackets = useMemo(() => {
+    if (!timeRange || activeScrubberTime === null) return null
+    return allAvailablePackets.filter(p => {
+      const t = activeSource === 'replay' ? p.replayTime : p.timestamp
+      if (t < timeRange.start || t > activeScrubberTime) return false
+      const group = packetProtocolGroup(p)
+      if (!activeProtocols.has(group)) return false
+      return packetMatchesFilter(p, activeFilter)
+    })
+  }, [timeRange, allAvailablePackets, activeSource, activeProtocols, activeFilter, activeScrubberTime, timelineBounds])
+
+  // Baseline: all packets before the window opened (empty base = all window packets are "new")
+  const baseWindowPackets = useMemo(() => {
+    if (!timeRange) return null
+    return allAvailablePackets.filter(p => {
+      const t = activeSource === 'replay' ? p.replayTime : p.timestamp
+      return t < timeRange.start
+    })
+  }, [timeRange, allAvailablePackets, activeSource])
+
+  const hasBaseWindow = Boolean(timeRange && windowPackets?.length)
+
+  // Window diff (only computed when compare is active)
+  const windowDiffResult = useMemo(() => {
+    if (!timeRange || !windowPackets || !windowCompareActive) return null
+    return computeCheckpointDiff(
+      buildWindowSnapshot(baseWindowPackets ?? []),
+      buildWindowSnapshot(windowPackets)
+    )
+  }, [timeRange, windowPackets, baseWindowPackets, windowCompareActive])
+
+  // Traffic analysis for the selected window (for summary panel)
+  const windowAnalysis = useMemo(() => {
+    if (!timeRange || !windowPackets) return null
+    return buildTrafficAnalysis(windowPackets, null, 'bytes')
+  }, [timeRange, windowPackets])
 
   const selectedPacket = useMemo(
     () => filteredPackets.find((packet) => packet.id === selectedPacketId) || null,
@@ -995,6 +1240,70 @@ export default function App() {
 
   useEffect(() => { replayIndexRef.current = replayIndex }, [replayIndex])
   useEffect(() => { replayPacketsRef.current = replayPackets }, [replayPackets])
+  useEffect(() => { timeRangeRef.current = timeRange }, [timeRange])
+  useEffect(() => { liveTimeRef.current = liveTime }, [liveTime])
+  useEffect(() => { windowDiffResultRef.current = windowDiffResult }, [windowDiffResult])
+
+  // Graph rebuild when time window changes
+  useEffect(() => {
+    if (!rebuildGraphRef.current) return
+    if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current)
+
+    if (timeRange !== null && windowPackets !== null) {
+      // When replay is actively playing, the existing ingest loop handles graph updates.
+      // Only rebuild on pause/scrub/end to avoid fighting the incremental ingest.
+      if (activeSource === 'replay' && replayState === 'playing') return
+      windowRebuildTimerRef.current = setTimeout(() => {
+        windowRebuildTimerRef.current = null
+        rebuildGraphRef.current?.(windowPackets)
+      }, 150)
+    } else if (timeRange === null) {
+      rebuildGraphRef.current(filteredPacketsRef.current)
+    }
+
+    return () => { if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current) }
+  }, [timeRange, windowPackets, activeSource, replayState])
+
+  // Live mode history scrubber — rebuild graph frozen at liveTime (or return to live edge)
+  useEffect(() => {
+    if (activeSource !== 'live' || timeRange !== null || !rebuildGraphRef.current) return
+    if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current)
+
+    if (liveTime !== null) {
+      const packets = livePacketsRef.current.filter(p => {
+        if (p.timestamp > liveTime) return false
+        const group = packetProtocolGroup(p)
+        if (!activeProtocols.has(group)) return false
+        return packetMatchesFilter(p, activeFilterRef.current)
+      })
+      windowRebuildTimerRef.current = setTimeout(() => {
+        windowRebuildTimerRef.current = null
+        rebuildGraphRef.current?.(packets)
+      }, 150)
+    } else {
+      rebuildGraphRef.current(filteredPacketsRef.current)
+    }
+    return () => { if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current) }
+  }, [liveTime, activeSource, activeFilter, activeProtocols, timeRange])
+
+  // Apply/clear diff visuals when window compare result changes
+  useEffect(() => {
+    if (!applyDiffStateRef.current || !clearDiffStateRef.current) return
+    if (windowDiffResult && windowCompareActive) {
+      applyDiffStateRef.current(windowDiffResult)
+    } else {
+      clearDiffStateRef.current()
+    }
+  }, [windowDiffResult, windowCompareActive])
+
+  // Clear window state when source switches
+  useEffect(() => {
+    setTimeRange(null)
+    setWindowCompareActive(false)
+    setLiveTime(null)
+    setActiveDiff(null)
+    setReferenceId(null)
+  }, [activeSource])
 
   useEffect(() => {
     if (analysisSnapshotTimerRef.current !== null) return undefined
@@ -1004,43 +1313,54 @@ export default function App() {
       setAnalysisSnapshot(buildTrafficAnalysis(filteredPacketsRef.current, replayMeta, conversationSort))
     }, ANALYSIS_SNAPSHOT_MS)
 
-    return undefined
+    return () => {
+      if (analysisSnapshotTimerRef.current !== null) {
+        clearTimeout(analysisSnapshotTimerRef.current)
+        analysisSnapshotTimerRef.current = null
+      }
+    }
   }, [conversationSort, filteredPackets, replayMeta])
-
-  // Feature 3 — draw sparkline when analysis updates
-  useEffect(() => {
-    const canvas = sparklineRef.current
-    if (!canvas) return
-    const buckets = trafficAnalysis.timelineBuckets
-    const maxBucket = trafficAnalysis.maxBucket || 1
-    const ctx = canvas.getContext('2d')
-    const w = canvas.width
-    const h = canvas.height
-    ctx.clearRect(0, 0, w, h)
-    const mean = buckets.reduce((s, v) => s + v, 0) / buckets.length
-    const sigma = Math.sqrt(buckets.reduce((s, v) => s + (v - mean) ** 2, 0) / buckets.length)
-    const spikeThreshold = mean + 2 * sigma
-    const barW = w / buckets.length
-    buckets.forEach((v, i) => {
-      const barH = (v / maxBucket) * (h - 2)
-      const isSpike = v > spikeThreshold && v > 0
-      ctx.fillStyle = isSpike ? 'rgba(251,146,60,0.85)' : 'rgba(129,140,248,0.6)'
-      ctx.fillRect(i * barW, h - barH, barW - 1, barH)
-    })
-  }, [trafficAnalysis])
 
   // Keep refs pointing at latest values so Three.js loop doesn't get stale closures
   useEffect(() => {
     queueAutoCheckpointRef.current = queueAutoCheckpoint
+    pushFeedEventRef.current = (event) => {
+      feedQueueRef.current.push({ ...event, id: crypto.randomUUID(), ts: Date.now() })
+    }
   })
   useEffect(() => {
     diffModeRef.current = diffMode
   }, [diffMode])
+  useEffect(() => {
+    autoCheckpointModeRef.current = autoCheckpointMode
+  }, [autoCheckpointMode])
+  // Flush feed queue to state every 500ms (batch updates from Three.js closure)
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (feedQueueRef.current.length === 0) return
+      const events = feedQueueRef.current.splice(0)
+      setChangeFeed(prev => [...events, ...prev].slice(0, 50))
+    }, 500)
+    return () => clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     activeDiffRef.current = activeDiff
     setDiffReasonTooltipRef.current = setDiffReasonTooltip
   }, [activeDiff])
+
+  // Keep "vs Current" diff live in live mode: re-diff whenever the graph state changes
+  useEffect(() => {
+    const ad = activeDiffRef.current
+    if (!ad || ad.compareId !== 'current' || activeSource !== 'live') return
+    const base = checkpoints.find(c => c.id === ad.baseId) || null
+    const compare = buildCurrentState()
+    if (!base || !compare) return
+    const result = computeCheckpointDiff(base, compare)
+    setActiveDiff(prev => prev ? { ...prev, result } : null)
+    applyDiffStateRef.current?.(result)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [analysisSnapshot, activeSource])
 
   useEffect(() => {
     showLabelsRef.current = showLabels
@@ -1124,15 +1444,27 @@ export default function App() {
     controls.minPolarAngle = 0
     controls.maxPolarAngle = Math.PI
 
-    // Pan reset fix: skip updateOrbitTarget() while user is actively controlling camera
+    // Pan reset fix: skip updateOrbitTarget() while user is actively controlling camera,
+    // and permanently once they have intentionally panned.
     let orbitActive = false
     let orbitActiveCooldown = null
+    let userHasPanned = false       // set true on first deliberate pan; reset on clearGraph
+    let targetBeforeGesture = null  // snapshot of controls.target at gesture start
+
     controls.addEventListener('start', () => {
       orbitActive = true
+      targetBeforeGesture = controls.target.clone()
       if (orbitActiveCooldown) clearTimeout(orbitActiveCooldown)
     })
     controls.addEventListener('end', () => {
       if (orbitActiveCooldown) clearTimeout(orbitActiveCooldown)
+      // Detect pan: if the orbit target moved horizontally, the user panned (not just rotated/zoomed)
+      if (targetBeforeGesture) {
+        const dx = Math.abs(controls.target.x - targetBeforeGesture.x)
+        const dz = Math.abs(controls.target.z - targetBeforeGesture.z)
+        if (dx > 1 || dz > 1) userHasPanned = true
+        targetBeforeGesture = null
+      }
       orbitActiveCooldown = setTimeout(() => {
         orbitActive = false
         orbitActiveCooldown = null
@@ -1178,9 +1510,46 @@ export default function App() {
     }
 
     function rebuildGraph(packets) {
-      clearGraph()
+      // When path tracing is active, render only the hop packets so intermediate
+      // nodes exist in the scene and can be highlighted cyan.
+      const pt = pathTraceRef.current
+      if (pt?.found) {
+        const allPkts = activeSourceRef.current === 'replay' ? replayPacketsRef.current : livePacketsRef.current
+        const pathEdgeKeySet = pt.pathEdgeKeys
+        packets = allPkts.filter(pkt => {
+          const a = pkt.srcIp || pkt.src
+          const b = pkt.dstIp || pkt.dst
+          if (!a || !b) return false
+          return pathEdgeKeySet.has(edgeKey(a, b))
+        })
+      }
+
+      // Preserve settled positions so layout doesn't shock on window/filter updates
+      const savedPositions = new Map()
+      nodeStore.forEach((node, ip) => {
+        savedPositions.set(ip, {
+          x: node.x, y: node.y, z: node.z,
+          vx: node.vx, vy: node.vy, vz: node.vz,
+        })
+      })
+
+      clearGraph(true)
       packets.forEach((packet) => ingestPacket(packet))
+
+      // Restore positions for nodes that survived the rebuild; new nodes keep randomPosition
+      nodeStore.forEach((node, ip) => {
+        const pos = savedPositions.get(ip)
+        if (!pos) return
+        node.x = pos.x; node.y = pos.y; node.z = pos.z
+        node.vx = pos.vx; node.vy = pos.vy; node.vz = pos.vz
+        node.tx = pos.x; node.ty = pos.y; node.tz = pos.z
+        node.group.position.set(pos.x, pos.y, pos.z)
+      })
+
       snapshotState()
+      if (applyDiffStateRef.current && windowDiffResultRef.current) {
+        applyDiffStateRef.current(windowDiffResultRef.current)
+      }
     }
 
     function labelForNode(node) {
@@ -1199,7 +1568,7 @@ export default function App() {
       updateTextSprite(node.label, nextLabel || node.ip)
     }
 
-    function clearGraph() {
+    function clearGraph(soft = false) {
       packetStore.splice(0).forEach((packet) => {
         scene.remove(packet.mesh)
         packet.mesh.material.dispose()
@@ -1224,10 +1593,14 @@ export default function App() {
       setSelectedIp(null)
       pointTargetRef.current = { active: false, ip: null, x: 0, y: 0 }
       setPointReticle((current) => ({ ...current, active: false, locked: false }))
-      controls.target.set(0, 0, 0)
-      controls.update()
-      layoutSpreadRef.current.value = 1
-      layoutSpreadRef.current.target = 1
+
+      if (!soft) {
+        controls.target.set(0, 0, 0)
+        controls.update()
+        userHasPanned = false
+        layoutSpreadRef.current.value = 1
+        layoutSpreadRef.current.target = 1
+      }
     }
 
     function ensureNode(ip) {
@@ -1502,6 +1875,7 @@ export default function App() {
         const kind = classifyIp(src)
         if (kind !== 'multicast' && kind !== 'broadcast' && kind !== 'loopback') {
           queueAutoCheckpointRef.current?.('New host discovered')
+          pushFeedEventRef.current?.({ type: 'new-host', ip: src, reason: `New host: ${src}`, severity: 'info' })
         }
       }
       if (!seenIpsRef.current.has(dst)) {
@@ -1511,6 +1885,7 @@ export default function App() {
         const kind = classifyIp(dst)
         if (kind !== 'multicast' && kind !== 'broadcast' && kind !== 'loopback') {
           queueAutoCheckpointRef.current?.('New host discovered')
+          pushFeedEventRef.current?.({ type: 'new-host', ip: dst, reason: `New host: ${dst}`, severity: 'info' })
         }
       }
       const edge = ensureEdge(src, dst)
@@ -1523,6 +1898,8 @@ export default function App() {
         if (srcKind === 'external' || dstKind === 'external') {
           seenExternalEdgesRef.current.add(edgeId)
           queueAutoCheckpointRef.current?.('New external connection detected')
+          const extIp = srcKind === 'external' ? src : dst
+          pushFeedEventRef.current?.({ type: 'external', ip: extIp, reason: `External: ${extIp}`, severity: 'warn' })
         }
       }
       if (packet.srcMac) srcNode.mac = packet.srcMac
@@ -1556,6 +1933,10 @@ export default function App() {
       const nodeList = [...nodeStore.values()]
       const edgeList = [...edgeStore.values()]
       const { hasFocus, depths } = applyGraphForces()
+      const pt = pathTraceRef.current
+      const pathActive = pt?.found === true
+      const pathIpSet = pathActive ? new Set(pt.pathIps) : null
+      const pathEdgeKeys = pathActive ? pt.pathEdgeKeys : null
 
       nodeList.forEach((node) => {
         const labelsEnabled = showLabelsRef.current
@@ -1643,12 +2024,43 @@ export default function App() {
           node.ring.material.opacity = THREE.MathUtils.lerp(node.ring.material.opacity, 0, 0.1)
         }
 
+        // VIEW-LAYER DE-EMPHASIS ONLY — does not affect data, diff, checkpoints, or stats.
+        // De-emphasized nodes still participate in all analysis; only their rendering is quieted.
+        if (deemphasizeGroupsRef.current.size > 0 && !node.diffState) {
+          const nodeKind = classifyIp(node.ip)
+          const isDeemphasized =
+            (deemphasizeGroupsRef.current.has('BCAST') && (nodeKind === 'broadcast' || isBcastIp(node.ip))) ||
+            (deemphasizeGroupsRef.current.has('MCAST') && (nodeKind === 'multicast' || isMcastIp(node.ip)))
+          if (isDeemphasized) {
+            node.mesh.material.opacity = THREE.MathUtils.lerp(node.mesh.material.opacity, 0.07, 0.1)
+          }
+        }
+
+        // Path trace — cyan highlight for path nodes, dim everything else
+        if (pathActive) {
+          if (pathIpSet.has(node.ip)) {
+            node.mesh.material.emissive.setHex(0x22d3ee)
+            node.mesh.material.emissiveIntensity = 1.0
+            node.mesh.material.opacity = 1.0
+            node.ring.material.color.setHex(0x22d3ee)
+            node.ring.material.opacity = 0.75
+          } else {
+            node.mesh.material.emissiveIntensity = 0.05
+            node.mesh.material.opacity = THREE.MathUtils.lerp(node.mesh.material.opacity, 0.12, 0.1)
+            node.ring.material.opacity = 0
+          }
+        }
+
         // Phase 1 — Traffic spike detection for auto-checkpoint (sampled every 120 frames)
         frameCountRef.current++
         if (frameCountRef.current % 120 === 0 && node.recentBytes > 0) {
           const avg = node.avgRecentBytes || node.recentBytes
-          if (node.recentBytes > avg * 5 && node.recentBytes > 12000) {
+          const aggressive = autoCheckpointModeRef.current === 'aggressive'
+          const mult = aggressive ? 3 : 5
+          const minBytes = aggressive ? 8000 : 12000
+          if (node.recentBytes > avg * mult && node.recentBytes > minBytes) {
             queueAutoCheckpointRef.current?.('Traffic spike detected')
+            pushFeedEventRef.current?.({ type: 'spike', ip: node.ip, reason: `Spike: ${node.ip}`, severity: 'warn' })
           }
           node.avgRecentBytes = avg * 0.9 + node.recentBytes * 0.1
         }
@@ -1682,6 +2094,16 @@ export default function App() {
         edge.mesh.geometry.computeBoundingSphere()
         edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, targetOpacity, 0.12)
 
+        // VIEW-LAYER DE-EMPHASIS ONLY (same guarantee as node de-emphasis above)
+        if (deemphasizeGroupsRef.current.size > 0 && !edge.diffState) {
+          const isDeemphasizedEdge =
+            (deemphasizeGroupsRef.current.has('BCAST') && (isBcastIp(edge.dst) || isBcastIp(edge.src))) ||
+            (deemphasizeGroupsRef.current.has('MCAST') && (isMcastIp(edge.dst) || isMcastIp(edge.src)))
+          if (isDeemphasizedEdge) {
+            edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.015, 0.1)
+          }
+        }
+
         // Diff state for edges
         if (edge.diffState === 'added') {
           if (edge.mesh.material.color.getHex() !== 0x34d399) edge.mesh.material.color.setHex(0x34d399)
@@ -1690,6 +2112,16 @@ export default function App() {
           if (edge.mesh.material.color.getHex() !== 0xf2f2f5) edge.mesh.material.color.setHex(0xf2f2f5)
           if (diffModeRef.current && !edge.diffState) {
             edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.02, 0.1)
+          }
+        }
+
+        // Path trace — cyan for path edges, near-invisible for everything else
+        if (pathActive) {
+          if (pathEdgeKeys.has(edge.key)) {
+            edge.mesh.material.color.setHex(0x22d3ee)
+            edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.92, 0.12)
+          } else {
+            edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.03, 0.1)
           }
         }
 
@@ -1788,9 +2220,8 @@ export default function App() {
       frameRef.current = requestAnimationFrame(animate)
       updateLayoutSpread()
       updateGraphVisuals()
-      console.log('nodes:', nodeStore.size, 'camera:', camera.position.y)
       updatePackets()
-      if (!orbitActive) updateOrbitTarget()
+      if (!orbitActive && !userHasPanned) updateOrbitTarget()
       if (screensaverActiveRef.current) {
         if (!screensaverRef.current.initialized) {
           screensaverRef.current.initialized = true
@@ -1987,9 +2418,9 @@ export default function App() {
     })
 
     ws.addEventListener('message', (event) => {
-      const data = JSON.parse(event.data)
+      let data
+      try { data = JSON.parse(event.data) } catch { return }
       if (data.type === 'packet') {
-        console.log('packet received', data)
         const packet = normalizePacket(data, 'live', Date.now())
         livePacketsRef.current.push(packet)
         if (livePacketsRef.current.length > LIVE_PACKET_HISTORY_LIMIT) {
@@ -2001,7 +2432,7 @@ export default function App() {
             setLivePackets([...livePacketsRef.current])
           }, LIVE_PACKET_UI_FLUSH_MS)
         }
-        if (appModeRef.current === 'live' && activeSourceRef.current === 'live' && packetMatchesFilter(packet, activeFilterRef.current)) {
+        if (appModeRef.current === 'live' && activeSourceRef.current === 'live' && packetMatchesFilter(packet, activeFilterRef.current) && !timeRangeRef.current && !liveTimeRef.current) {
           ingestPacket(packet)
         }
       }
@@ -2225,18 +2656,26 @@ export default function App() {
   }, [gesturesEnabled])
 
   useEffect(() => {
+    if (graphRebuildTimerRef.current !== null) {
+      clearTimeout(graphRebuildTimerRef.current)
+      graphRebuildTimerRef.current = null
+    }
     if (!rebuildGraphRef.current) return
     if (activeSource === 'replay') {
       rebuildGraphRef.current(filteredPacketsRef.current)
       lastIngestedReplayIndexRef.current = replayIndexRef.current
       return
     }
-
-    if (graphRebuildTimerRef.current !== null) return
     graphRebuildTimerRef.current = window.setTimeout(() => {
       graphRebuildTimerRef.current = null
       rebuildGraphRef.current?.(filteredPacketsRef.current)
     }, LIVE_GRAPH_REBUILD_MS)
+    return () => {
+      if (graphRebuildTimerRef.current !== null) {
+        clearTimeout(graphRebuildTimerRef.current)
+        graphRebuildTimerRef.current = null
+      }
+    }
   }, [activeFilter, activeSource])
 
   useEffect(() => {
@@ -2288,14 +2727,15 @@ export default function App() {
   function handleFilterInput(e) {
     const val = e.target.value
     setFilterInput(val)
-    const q = val.trim().toLowerCase()
-    setFilterSuggestions(q ? FILTER_SUGGESTIONS.filter(s => s.startsWith(q)) : FILTER_SUGGESTIONS)
+    const activeToken = val.includes('&&') ? val.split('&&').pop().trim().toLowerCase() : val.trim().toLowerCase()
+    setFilterSuggestions(activeToken ? FILTER_SUGGESTIONS.filter(s => s.startsWith(activeToken)) : FILTER_SUGGESTIONS)
     setSuggestionIndex(-1)
   }
 
   function handleFilterFocus() {
-    const q = filterInput.trim().toLowerCase()
-    setFilterSuggestions(q ? FILTER_SUGGESTIONS.filter(s => s.startsWith(q)) : FILTER_SUGGESTIONS)
+    const val = filterInput
+    const activeToken = val.includes('&&') ? val.split('&&').pop().trim().toLowerCase() : val.trim().toLowerCase()
+    setFilterSuggestions(activeToken ? FILTER_SUGGESTIONS.filter(s => s.startsWith(activeToken)) : FILTER_SUGGESTIONS)
   }
 
   function handleFilterBlur() {
@@ -2311,7 +2751,13 @@ export default function App() {
   }
 
   function pickSuggestion(s) {
-    setFilterInput(s)
+    if (filterInput.includes('&&')) {
+      const parts = filterInput.split('&&')
+      parts[parts.length - 1] = ' ' + s
+      setFilterInput(parts.join('&&'))
+    } else {
+      setFilterInput(s)
+    }
     setFilterSuggestions([])
     setSuggestionIndex(-1)
   }
@@ -2362,6 +2808,9 @@ export default function App() {
         linkTypes: parsed.linkTypes || [],
       })
       setReplayState(parsed.packets.length ? 'playing' : 'idle')
+      if (parsed.packets.length) {
+        setTimeRange({ start: 0, end: parsed.duration })
+      }
       if (!parsed.packets.length) {
         const linkTypes = parsed.linkTypes?.length
           ? parsed.linkTypes.map(linkTypeLabel).join(', ')
@@ -2373,6 +2822,9 @@ export default function App() {
     } catch (error) {
       setReplayPackets([])
       setReplayMeta(null)
+      setReplayIndex(0)
+      setReplayTime(0)
+      setTimeRange(null)
       setReplayError(error instanceof Error ? error.message : 'Could not parse that capture file.')
     } finally {
       event.target.value = ''
@@ -2384,6 +2836,106 @@ export default function App() {
     setReplayIndex(0)
     setReplayTime(0)
     setReplayState(replayPackets.length ? nextState : 'idle')
+  }
+
+  function handleTimelinePointerDown(e) {
+    if (!timelineBounds || !trackRef.current) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    const rect = trackRef.current.getBoundingClientRect()
+    const span = timelineBounds.max - timelineBounds.min
+    const x = e.clientX - rect.left
+    const W = rect.width
+    const tAtX = timelineBounds.min + Math.max(0, Math.min(1, x / W)) * span
+    const ds = dragStateRef.current
+    ds.startTime = tAtX
+    ds.movedEnough = false
+
+    if (timeRange) {
+      const leftPx  = ((timeRange.start - timelineBounds.min) / span) * W
+      const rightPx = ((timeRange.end   - timelineBounds.min) / span) * W
+      {
+        const scrubT0 = activeSource === 'replay' ? replayTime : (liveTime ?? timelineBounds.max)
+        const playPx = ((scrubT0 - timelineBounds.min) / span) * W
+        if (Math.abs(x - playPx) <= 7) { ds.mode = 'playhead'; return }
+      }
+      if (Math.abs(x - leftPx)  <= 9) { ds.mode = 'windowLeft';  return }
+      if (Math.abs(x - rightPx) <= 9) { ds.mode = 'windowRight'; return }
+      if (x > leftPx + 9 && x < rightPx - 9) {
+        ds.mode = 'windowBody'
+        ds.startWindowStart = timeRange.start
+        ds.startWindowEnd   = timeRange.end
+        return
+      }
+    }
+    ds.mode = 'playheadOrDraw'
+    ds.startWindowStart = tAtX
+  }
+
+  function handleTimelinePointerMove(e) {
+    const ds = dragStateRef.current
+    if (!ds.mode || !timelineBounds || !trackRef.current) return
+    const rect = trackRef.current.getBoundingClientRect()
+    const span = timelineBounds.max - timelineBounds.min
+    const t = timelineBounds.min + Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * span
+    const threshold = span * 0.008
+
+    if (ds.mode === 'playheadOrDraw' && Math.abs(t - ds.startTime) > threshold) {
+      ds.mode = 'drawing'
+      ds.movedEnough = true
+    }
+
+    switch (ds.mode) {
+      case 'playhead': {
+        const t2 = timeRange
+          ? Math.max(timeRange.start, Math.min(timeRange.end, t))
+          : t
+        if (activeSource === 'replay') scrubReplay(t2)
+        else if (activeSource === 'live') setLiveTime(t2)
+        break
+      }
+      case 'windowLeft':
+        setTimeRange(r => r ? { ...r, start: Math.max(timelineBounds.min, Math.min(t, r.end - threshold)) } : r)
+        break
+      case 'windowRight':
+        setTimeRange(r => r ? { ...r, end: Math.min(timelineBounds.max, Math.max(t, r.start + threshold)) } : r)
+        break
+      case 'windowBody': {
+        const dur = ds.startWindowEnd - ds.startWindowStart
+        const delta = t - ds.startTime
+        const ns = Math.max(timelineBounds.min, Math.min(timelineBounds.max - dur, ds.startWindowStart + delta))
+        setTimeRange({ start: ns, end: ns + dur })
+        break
+      }
+      case 'drawing': {
+        const s   = Math.min(ds.startWindowStart, t)
+        const end = Math.max(ds.startWindowStart, t)
+        setTimeRange({ start: Math.max(timelineBounds.min, s), end: Math.min(timelineBounds.max, end) })
+        break
+      }
+    }
+  }
+
+  function handleTimelinePointerUp(e) {
+    const ds = dragStateRef.current
+    if (!ds.mode) return
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch {}
+
+    if (ds.mode === 'playheadOrDraw') {
+      if (activeSource === 'replay' && replayMeta) scrubReplay(ds.startTime)
+      else if (activeSource === 'live') setLiveTime(ds.startTime)
+      ds.mode = null
+      return
+    }
+    if (ds.mode === 'drawing' && timelineBounds) {
+      const span = timelineBounds.max - timelineBounds.min
+      if (!timeRange || (timeRange.end - timeRange.start) < span * 0.008) {
+        setTimeRange(null)
+        if (activeSource === 'replay' && replayMeta) scrubReplay(ds.startTime)
+        else if (activeSource === 'live') setLiveTime(ds.startTime)
+      }
+    }
+    ds.mode = null
+    ds.movedEnough = false
   }
 
   function scrubReplay(value) {
@@ -2466,6 +3018,7 @@ export default function App() {
       id: crypto.randomUUID(),
       label: opts.label || `Checkpoint ${new Date().toLocaleTimeString()}`,
       createdAt: Date.now(),
+      source: activeSourceRef.current,
       type: opts.type || 'manual',
       reason: opts.reason || null,
       eventSummary: opts.eventSummary || [],
@@ -2479,6 +3032,7 @@ export default function App() {
   }
 
   function queueAutoCheckpoint(reason) {
+    if (autoCheckpointMode === 'off') return
     autoCheckpointQueueRef.current.push(reason)
     if (autoCheckpointTimerRef.current) return
     autoCheckpointTimerRef.current = window.setTimeout(() => {
@@ -2518,6 +3072,28 @@ export default function App() {
     clearDiffStateRef.current?.()
   }
 
+  function updateCheckpointLabel(id, label) {
+    setCheckpoints(prev => prev.map(c => c.id === id ? { ...c, label: label.trim() || c.label } : c))
+  }
+  function startRename(cp) {
+    setEditingCpId(cp.id)
+    setEditingCpLabel(cp.label)
+  }
+  function commitRename() {
+    if (editingCpId && editingCpLabel.trim()) updateCheckpointLabel(editingCpId, editingCpLabel)
+    setEditingCpId(null)
+    setEditingCpLabel('')
+  }
+  function fmtTs(ts) {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  }
+  function submitCheckpointLabel() {
+    const label = pendingLabel.trim() || `Checkpoint ${new Date().toLocaleTimeString()}`
+    takeCheckpoint({ label })
+    setPendingLabel('')
+    setLabelingOpen(false)
+  }
+
   // Feature 1 — summary chip data
   const topTalker = trafficAnalysis.endpoints[0] || null
   const mostPeers = (() => {
@@ -2534,55 +3110,187 @@ export default function App() {
   })()
   const recentAlerts = alertsRef.current.slice(-5).reverse()
   const alertCount = alertsRef.current.length
+  const filteredCheckpoints = checkpoints.filter(c => !c.source || c.source === activeSource)
 
+  const nodeInspectionData = useMemo(() => {
+    if (!selectedIp) return null
+    const ipPkts = allAvailablePackets.filter(p => {
+      const s = p.src || p.srcIp
+      const d = p.dst || p.dstIp
+      return s === selectedIp || d === selectedIp
+    })
+    if (!ipPkts.length) return null
+
+    let bytes = 0
+    const protos = new Set()
+    const peerBytes = new Map()
+    let mac = null
+
+    for (const p of ipPkts) {
+      bytes += p.size || 0
+      if (p.proto) protos.add(p.proto)
+      const s = p.src || p.srcIp
+      const d = p.dst || p.dstIp
+      const peer = s === selectedIp ? d : s
+      if (peer) peerBytes.set(peer, (peerBytes.get(peer) || 0) + (p.size || 0))
+      if (!mac && p.srcMac && s === selectedIp) mac = p.srcMac
+      if (!mac && p.dstMac && d === selectedIp) mac = p.dstMac
+    }
+
+    const filteredIpPkts = ipPkts.filter(p =>
+      activeProtocols.has(packetProtocolGroup(p)) &&
+      packetMatchesFilter(p, activeFilter)
+    )
+
+    return {
+      bytes,
+      packets: ipPkts.length,
+      protocols: [...protos].sort(),
+      mac: mac || null,
+      peers: [...peerBytes.entries()]
+        .map(([ip, b]) => ({ ip, bytes: b }))
+        .sort((a, b) => b.bytes - a.bytes),
+      recentPackets: filteredIpPkts.slice(-60).reverse(),
+    }
+  }, [selectedIp, allAvailablePackets, activeProtocols, activeFilter])
+
+  const ALL_PROTOCOLS = ['TCP','UDP','DNS','ARP','BCAST','MCAST','OTHER']
   const analysisContent = {
     live: () => (
-      <section className="analysisTab liveAnalysis">
-        <div className="sourceSwitch" aria-label="Input source">
-          <button className={activeSource === 'live' ? 'active' : ''} type="button" onClick={() => { setActiveSource('live'); setAppMode('live'); setReplayState('idle') }}>Live</button>
-          <button className={activeSource === 'replay' ? 'active' : ''} type="button" onClick={() => { setActiveSource('replay'); setAppMode('replay') }}>PCAP Replay</button>
-        </div>
+      <section className={`controlDock${liveAnalysisCollapsed ? ' dockCollapsed' : ''}`} aria-label="Capture controls">
+        {liveAnalysisCollapsed ? (
+          /* ── Collapsed tab ── */
+          <button className="dockTab" type="button" onClick={() => setLiveAnalysisCollapsed(false)} aria-label="Expand controls">
+            <span className={`dockTabIcon dockTabIcon--${activeSource}`}>
+              {activeSource === 'live' ? (
+                <svg viewBox="0 0 10 10" fill="currentColor"><circle cx="5" cy="5" r="4.5" /></svg>
+              ) : (
+                <svg viewBox="0 0 10 10" fill="currentColor"><polygon points="1.5,1 9.5,5 1.5,9" /></svg>
+              )}
+            </span>
+            {activeProtocols.size < ALL_PROTOCOLS.length && (
+              <span className="dockFilterDot" title={`${ALL_PROTOCOLS.length - activeProtocols.size} protocol(s) filtered`} />
+            )}
+            <span className="dockTabChevron">›</span>
+          </button>
+        ) : (
+          /* ── Expanded dock ── */
+          <div className="dockInner">
+            <div className="dockHeader">
+              <span className="dockLabel">Capture</span>
+              <button type="button" className="dockCollapseBtn" onClick={() => setLiveAnalysisCollapsed(true)} aria-label="Collapse">‹</button>
+            </div>
 
-        {/* Feature 4 — Protocol toggles */}
-        <div className="protocolToggles">
-          {['TCP','UDP','DNS','ARP','BCAST','MCAST','OTHER'].map(proto => (
-            <button
-              key={proto}
-              type="button"
-              className={activeProtocols.has(proto) ? 'active' : ''}
-              onClick={() => setActiveProtocols(prev => {
-                const next = new Set(prev)
-                next.has(proto) ? next.delete(proto) : next.add(proto)
-                return next
-              })}
-            >{proto}</button>
-          ))}
-        </div>
+            {/* Mode switcher */}
+            <div className="dockModeSwitch">
+              <button
+                type="button"
+                className={`dockModeBtn dockModeBtn--live${activeSource === 'live' ? ' active' : ''}`}
+                onClick={() => { setActiveSource('live'); setAppMode('live'); setReplayState('idle') }}
+              >
+                <svg className="dockModeIcon" viewBox="0 0 10 10" fill="currentColor">
+                  <circle cx="5" cy="5" r="4.5" />
+                </svg>
+                Live
+              </button>
+              <button
+                type="button"
+                className={`dockModeBtn dockModeBtn--pcap${activeSource === 'replay' ? ' active' : ''}`}
+                onClick={() => { setActiveSource('replay'); setAppMode('replay') }}
+              >
+                <svg className="dockModeIcon" viewBox="0 0 10 10" fill="currentColor">
+                  <polygon points="1.5,1 9.5,5 1.5,9" />
+                </svg>
+                PCAP
+              </button>
+            </div>
 
-        {activeSource === 'replay' && (
-          <div className="sourcePanel">
-            <label className="uploadZone">
-              <input type="file" accept=".pcap,.pcapng" onChange={handleReplayFile} />
-              <strong>Upload .pcap or .pcapng</strong>
-            </label>
-            {replayError && <p className="permissionError">{replayError}</p>}
-            {replayMeta && (
+            {/* Protocol filter tray */}
+            <div className="dockDivider" />
+            <div className="dockFilterSection">
+              <div className="dockSectionHeader">
+                <span className="dockSectionLabel">Protocols</span>
+                <button
+                  type="button"
+                  className="dockAllToggle"
+                  onClick={() => setActiveProtocols(
+                    activeProtocols.size === ALL_PROTOCOLS.length
+                      ? new Set()
+                      : new Set(ALL_PROTOCOLS)
+                  )}
+                >{activeProtocols.size === ALL_PROTOCOLS.length ? 'none' : 'all'}</button>
+              </div>
+              <div className="dockProtos">
+                {ALL_PROTOCOLS.map(proto => (
+                  <button
+                    key={proto}
+                    type="button"
+                    className={`dockProtoChip${activeProtocols.has(proto) ? ' active' : ''}`}
+                    onClick={() => setActiveProtocols(prev => {
+                      const next = new Set(prev)
+                      next.has(proto) ? next.delete(proto) : next.add(proto)
+                      return next
+                    })}
+                  >{proto}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* Replay controls */}
+            {activeSource === 'replay' && (
               <>
-                <dl className="replayStats">
-                  <div><dt>File</dt><dd>{replayMeta.name}</dd></div>
-                  <div><dt>Parsed</dt><dd>{replayMeta.parsed.toLocaleString()}</dd></div>
-                  <div><dt>Skipped</dt><dd>{replayMeta.skipped.toLocaleString()}</dd></div>
-                  <div><dt>Time</dt><dd>{replayTime.toFixed(1)}s</dd></div>
-                </dl>
-                <div className="playbackControls">
-                  <button type="button" disabled={!replayPackets.length} onClick={() => setReplayState(replayState === 'playing' ? 'paused' : 'playing')}>{replayState === 'playing' ? 'Pause' : 'Play'}</button>
-                  <button type="button" disabled={!replayPackets.length} onClick={() => restartReplay('paused')}>Restart</button>
-                  <select value={replaySpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))}>
-                    {[0.25, 0.5, 1, 2, 4].map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
-                  </select>
+                <div className="dockDivider" />
+                <div className="sourcePanel">
+                  <label className="uploadZone">
+                    <input type="file" accept=".pcap,.pcapng" onChange={handleReplayFile} />
+                    <strong>Upload .pcap or .pcapng</strong>
+                  </label>
+                  {replayError && <p className="permissionError">{replayError}</p>}
+                  {replayMeta && (
+                    <>
+                      <dl className="replayStats">
+                        <div><dt>File</dt><dd>{replayMeta.name}</dd></div>
+                        <div><dt>Parsed</dt><dd>{replayMeta.parsed.toLocaleString()}</dd></div>
+                        <div><dt>Skipped</dt><dd>{replayMeta.skipped.toLocaleString()}</dd></div>
+                        <div><dt>Time</dt><dd>{replayTime.toFixed(1)}s</dd></div>
+                      </dl>
+                      <div className="playbackControls">
+                        <button type="button" disabled={!replayPackets.length} onClick={() => setReplayState(replayState === 'playing' ? 'paused' : 'playing')}>{replayState === 'playing' ? 'Pause' : 'Play'}</button>
+                        <button type="button" disabled={!replayPackets.length} onClick={() => restartReplay('paused')}>Restart</button>
+                        <select value={replaySpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))}>
+                          {[0.25, 0.5, 1, 2, 4].map((speed) => <option key={speed} value={speed}>{speed}x</option>)}
+                        </select>
+                      </div>
+                      <p className="noteText">{replayIndex.toLocaleString()} of {replayPackets.length.toLocaleString()} packets replayed.</p>
+                    </>
+                  )}
                 </div>
-                <p className="noteText">{replayIndex.toLocaleString()} of {replayPackets.length.toLocaleString()} packets replayed.</p>
               </>
+            )}
+          </div>
+        )}
+
+        {/* Path trace panel — anchored below the dock */}
+        {!screensaverActive && pathTrace && (
+          <div className="pathPanel">
+            <div className="pathPanelHeader">
+              <span className="pathPanelTitle">Observed Conversation Path</span>
+              <span className="pathPanelEndpoints">{pathTrace.src} → {pathTrace.dst}</span>
+            </div>
+            {pathTrace.found ? (
+              <>
+                <div className="pathHops">
+                  {pathTrace.hops.map((hop, i) => (
+                    <div key={i} className="pathHop">
+                      <span className="pathHopIps">{hop.src} → {hop.dst}</span>
+                      <span className="pathHopStats">{hop.packets}p · {formatBytes(hop.bytes)}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="pathHopCount">{pathTrace.hops.length} hop{pathTrace.hops.length !== 1 ? 's' : ''}</div>
+              </>
+            ) : (
+              <div className="pathNoPath">No path found in captured traffic</div>
             )}
           </div>
         )}
@@ -2610,7 +3318,6 @@ export default function App() {
                     onFocus={handleFilterFocus}
                     onBlur={handleFilterBlur}
                     onKeyDown={handleFilterKeyDown}
-                    placeholder="tcp.port == 443"
                     autoComplete="off"
                   />
                   {filterSuggestions.length > 0 && (
@@ -2627,16 +3334,33 @@ export default function App() {
                     </ul>
                   )}
                 </div>
-                <button type="submit">Apply</button>
-                <button type="button" onClick={clearDisplayFilter}>Clear</button>
                 <div className="filterBarCheckpoints">
-                  <button type="button" className="cpSaveBtn" onClick={() => takeCheckpoint()}>Checkpoint</button>
+                  {labelingOpen
+                    ? (
+                      <div className="cpLabelForm">
+                        <input
+                          autoFocus
+                          className="cpLabelInput"
+                          placeholder={`Checkpoint ${new Date().toLocaleTimeString()}`}
+                          value={pendingLabel}
+                          onChange={e => setPendingLabel(e.target.value)}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') { e.preventDefault(); submitCheckpointLabel() }
+                            if (e.key === 'Escape') { setLabelingOpen(false); setPendingLabel('') }
+                          }}
+                        />
+                        <button type="button" className="cpSaveBtn" onClick={submitCheckpointLabel}>Save</button>
+                        <button type="button" onClick={() => { setLabelingOpen(false); setPendingLabel('') }}>✕</button>
+                      </div>
+                    )
+                    : <button type="button" className="cpSaveBtn" onClick={() => setLabelingOpen(true)}>Checkpoint</button>
+                  }
                   <button
                     type="button"
                     className={['cpHistoryBtn', checkpointPanelOpen ? 'active' : ''].filter(Boolean).join(' ')}
                     onClick={() => setCheckpointPanelOpen(v => !v)}
                   >
-                    History{checkpoints.length > 0 ? ` (${checkpoints.length})` : ''}
+                    History{filteredCheckpoints.length > 0 ? ` (${filteredCheckpoints.length})` : ''}
                   </button>
                 </div>
                 {filterError && <p className="filterError">{filterError}</p>}
@@ -2678,22 +3402,89 @@ export default function App() {
                   <span>Checkpoints</span>
                   <button type="button" onClick={() => setCheckpointPanelOpen(false)}>×</button>
                 </div>
+                <div className="cpModeSelector">
+                  {['off', 'smart', 'aggressive'].map(m => (
+                    <button
+                      key={m}
+                      type="button"
+                      className={autoCheckpointMode === m ? 'active' : ''}
+                      onClick={() => setAutoCheckpointMode(m)}
+                    >{m}</button>
+                  ))}
+                </div>
+                {referenceId && (() => {
+                  const refCp = checkpoints.find(c => c.id === referenceId)
+                  if (!refCp) return null
+                  return (
+                    <div className="cpReferenceBar">
+                      <span className="cpRefLabel">Reference: <strong>{refCp.label}</strong></span>
+                      <button type="button" onClick={() => computeDiff(referenceId, 'current')}>vs Current</button>
+                      <button type="button" className="cpRefClear" onClick={() => setReferenceId(null)}>Clear</button>
+                    </div>
+                  )
+                })()}
                 <div className="checkpointList">
-                  {checkpoints.length === 0 && (
+                  {filteredCheckpoints.length === 0 && (
                     <p className="cpEmpty">No checkpoints yet. Click "Checkpoint" to capture current network state.</p>
                   )}
-                  {checkpoints.slice().reverse().map(cp => (
+                  {filteredCheckpoints.slice().reverse().map(cp => (
                     <div key={cp.id} className={['checkpointItem', cp.type === 'auto' ? 'cpAuto' : ''].filter(Boolean).join(' ')}>
                       <div className="cpMeta">
-                        <span className="cpLabel">{cp.label}</span>
+                        {editingCpId === cp.id
+                          ? (
+                            <input
+                              autoFocus
+                              className="cpLabelInput"
+                              value={editingCpLabel}
+                              onChange={e => setEditingCpLabel(e.target.value)}
+                              onBlur={commitRename}
+                              onKeyDown={e => {
+                                if (e.key === 'Enter') commitRename()
+                                if (e.key === 'Escape') { setEditingCpId(null); setEditingCpLabel('') }
+                              }}
+                            />
+                          )
+                          : (
+                            <span
+                              className="cpLabel cpLabelEditable"
+                              title="Double-click to rename"
+                              onDoubleClick={() => startRename(cp)}
+                            >{cp.label}</span>
+                          )
+                        }
                         <span className="cpStats">{cp.nodeCount} hosts · {cp.edgeCount} edges</span>
                         {cp.reason && <span className="cpReason">{cp.reason}</span>}
                       </div>
                       <div className="cpActions">
+                        {cp.id === referenceId
+                          ? <span className="cpRefBadge">Reference</span>
+                          : <button type="button" className="cpRefBtn" onClick={() => setReferenceId(cp.id)}>Set as Reference</button>
+                        }
                         <button type="button" onClick={() => computeDiff(cp.id, 'current')}>vs Now</button>
-                        <button type="button" onClick={() => setCheckpoints(prev => prev.filter(c => c.id !== cp.id))}>×</button>
+                        <button type="button" onClick={() => {
+                          if (cp.id === referenceId) setReferenceId(null)
+                          setCheckpoints(prev => prev.filter(c => c.id !== cp.id))
+                        }}>×</button>
                       </div>
                     </div>
+                  ))}
+                </div>
+                <div className="focusControls">
+                  <span className="focusLabel">De-emphasize:</span>
+                  {[
+                    { key: 'BCAST', label: 'Broadcast / ARP' },
+                    { key: 'MCAST', label: 'Multicast / mDNS' },
+                  ].map(({ key, label }) => (
+                    <button
+                      key={key}
+                      type="button"
+                      className={deemphasizeGroups.has(key) ? 'active' : ''}
+                      onClick={() => setDeemphasizeGroups(prev => {
+                        const next = new Set(prev)
+                        next.has(key) ? next.delete(key) : next.add(key)
+                        return next
+                      })}
+                    >{label}</button>
                   ))}
                 </div>
               </div>
@@ -2816,6 +3607,36 @@ export default function App() {
                 {diffReasonTooltip.text}
               </div>
             )}
+
+            {/* Live Change Feed */}
+            {!screensaverActive && (
+              <div className={`changeFeedPanel${feedOpen ? ' open' : ''}`}>
+                <div className="feedHeader" onClick={() => setFeedOpen(o => !o)}>
+                  <span>Live Feed</span>
+                  {changeFeed.length > 0 && <span className="feedCount">{changeFeed.length}</span>}
+                  <span className="feedChevron">{feedOpen ? '▾' : '▸'}</span>
+                </div>
+                {feedOpen && (
+                  <div className="feedList">
+                    {changeFeed.length === 0
+                      ? <div className="feedEmpty">No events yet</div>
+                      : changeFeed.map(e => (
+                        <button
+                          key={e.id}
+                          type="button"
+                          className={`feedRow ${e.type}`}
+                          onClick={() => e.ip && setSelectedIp(e.ip)}
+                        >
+                          <span className="feedTime">{fmtTs(e.ts)}</span>
+                          <span className="feedReason">{e.reason}</span>
+                        </button>
+                      ))
+                    }
+                  </div>
+                )}
+              </div>
+            )}
+
             {screensaverActive && (
               <div
                 onClick={() => setScreensaverActive(false)}
@@ -2862,69 +3683,122 @@ export default function App() {
                       ))}
                     </div>
                     <div className="inspectionBody">
-                      {drawerTab === 'overview' && (() => {
-                        const ep = trafficAnalysis.endpoints.find(e => e.ip === selectedIp)
-                        return ep ? (
+                      {drawerTab === 'overview' && (
+                        nodeInspectionData ? (
                           <>
                             <dl className="inspectionDl">
-                              <div><dt>IP</dt><dd>{ep.ip}</dd></div>
-                              <div><dt>Type</dt><dd>{classifyIp(ep.ip)}</dd></div>
-                              {ep.mac && <div><dt>MAC</dt><dd>{ep.mac}</dd></div>}
-                              <div><dt>Bytes</dt><dd>{fmtBytes(ep.bytes)}</dd></div>
-                              <div><dt>Packets</dt><dd>{ep.packets.toLocaleString()}</dd></div>
-                              <div><dt>Protocols</dt><dd>{[...ep.protocols].join(', ')}</dd></div>
+                              <div><dt>IP</dt><dd>{selectedIp}</dd></div>
+                              <div><dt>Type</dt><dd>{classifyIp(selectedIp)}</dd></div>
+                              {nodeInspectionData.mac && <div><dt>MAC</dt><dd>{nodeInspectionData.mac}</dd></div>}
+                              <div><dt>Bytes</dt><dd>{fmtBytes(nodeInspectionData.bytes)}</dd></div>
+                              <div><dt>Packets</dt><dd>{nodeInspectionData.packets.toLocaleString()}</dd></div>
+                              <div><dt>Protocols</dt><dd>{nodeInspectionData.protocols.join(', ')}</dd></div>
                             </dl>
                             <button
                               type="button"
                               className="copyFilterBtn"
-                              onClick={() => navigator.clipboard?.writeText(`ip.addr == ${ep.ip}`)}
+                              onClick={() => navigator.clipboard?.writeText(`ip.addr == ${selectedIp}`)}
                             >
                               Copy Wireshark Filter
                             </button>
                           </>
                         ) : <p className="inspectionEmpty">No data yet.</p>
-                      })()}
-                      {drawerTab === 'peers' && (() => {
-                        const peers = trafficAnalysis.conversations.filter(c => c.src === selectedIp || c.dst === selectedIp)
-                        return peers.length ? (
+                      )}
+                      {drawerTab === 'peers' && (
+                        nodeInspectionData?.peers.length ? (
                           <ul className="inspectionList">
-                            {peers.slice(0, 40).map((c, i) => {
-                              const peer = c.src === selectedIp ? c.dst : c.src
-                              return (
-                                <li key={i}>
-                                  <button type="button" onClick={() => setSelectedIp(peer)}>{peer}</button>
-                                  <span>{c.bytes.toLocaleString()} B</span>
-                                </li>
-                              )
-                            })}
+                            {nodeInspectionData.peers.slice(0, 40).map((peer, i) => (
+                              <li key={i}>
+                                <button type="button" onClick={() => setSelectedIp(peer.ip)}>{peer.ip}</button>
+                                <span>{peer.bytes.toLocaleString()} B</span>
+                              </li>
+                            ))}
                           </ul>
                         ) : <p className="inspectionEmpty">No conversations yet.</p>
-                      })()}
-                      {drawerTab === 'protocols' && (() => {
-                        const ep = trafficAnalysis.endpoints.find(e => e.ip === selectedIp)
-                        const protos = ep ? [...ep.protocols] : []
-                        return protos.length ? (
+                      )}
+                      {drawerTab === 'protocols' && (
+                        nodeInspectionData?.protocols.length ? (
                           <ul className="inspectionList">
-                            {protos.map(p => <li key={p}><span>{p}</span></li>)}
+                            {nodeInspectionData.protocols.map(p => <li key={p}><span>{p}</span></li>)}
                           </ul>
                         ) : <p className="inspectionEmpty">No protocol data.</p>
-                      })()}
-                      {drawerTab === 'packets' && (() => {
-                        const pkts = filteredPackets.filter(p => p.src === selectedIp || p.dst === selectedIp).slice(-60).reverse()
-                        return pkts.length ? (
+                      )}
+                      {drawerTab === 'packets' && (
+                        nodeInspectionData?.recentPackets.length ? (
                           <ul className="inspectionList inspectionPackets">
-                            {pkts.map((p, i) => (
+                            {nodeInspectionData.recentPackets.map((p, i) => (
                               <li key={i}>
                                 <span className="pktProto">{p.proto || 'OTHER'}</span>
-                                <span>{p.src === selectedIp ? '→' : '←'} {p.src === selectedIp ? p.dst : p.src}</span>
+                                <span>{(p.src || p.srcIp) === selectedIp ? '→' : '←'} {(p.src || p.srcIp) === selectedIp ? (p.dst || p.dstIp) : (p.src || p.srcIp)}</span>
                                 <span>{p.size || 0}B</span>
                               </li>
                             ))}
                           </ul>
                         ) : <p className="inspectionEmpty">No packets yet.</p>
-                      })()}
+                      )}
                     </div>
                   </>
+                ) : rightPanelOpen && timeRange && windowAnalysis ? (
+                  /* Window Summary — shown when a time range is selected */
+                  <div className="windowSummary">
+                    <div className="windowSummaryHeader">
+                      <span className="windowSummaryTitle">
+                        {windowCompareActive ? 'Top Changes' : 'Window Summary'}
+                        <span className="windowDuration"> ({formatWindowDuration(timeRange)})</span>
+                      </span>
+                      <button type="button" className="inspectionClose" onClick={() => { setTimeRange(null); setWindowCompareActive(false) }}>×</button>
+                    </div>
+                    <div className="windowStatRow">
+                      <span>{windowAnalysis.endpoints.length} hosts</span>
+                      <span>{fmtBytes(windowAnalysis.totalBytes)}</span>
+                      {windowDiffResult && <span className="windowNewCount">+{windowDiffResult.summary.addedNodeCount} new</span>}
+                    </div>
+                    <div className="windowSection">
+                      <div className="windowSectionTitle">{windowCompareActive && windowDiffResult ? 'Top Changes' : 'Top Talkers'}</div>
+                      {(windowCompareActive && windowDiffResult?.changedNodes.length > 0
+                        ? windowDiffResult.changedNodes.slice(0, 6)
+                        : windowAnalysis.endpoints.slice(0, 6)
+                      ).map(item => {
+                        const ip = item.ip
+                        const isNew = windowDiffResult?.addedNodes.some(n => n.ip === ip)
+                        const isChanged = !isNew && windowDiffResult?.changedNodes.some(n => n.ip === ip)
+                        return (
+                          <button key={ip} type="button" className="windowNodeRow" onClick={() => setSelectedIp(ip)}>
+                            <span className="windowNodeIp">{ip}</span>
+                            <span className="windowNodeBytes">{fmtBytes(item.bytes ?? item.bytesDelta ?? 0)}</span>
+                            {isNew && <span className="windowBadge new">new</span>}
+                            {isChanged && <span className="windowBadge chg">↑</span>}
+                          </button>
+                        )
+                      })}
+                    </div>
+                    {windowDiffResult?.addedNodes.filter(n => n.kind === 'external').length > 0 && (
+                      <div className="windowSection">
+                        <div className="windowSectionTitle">New External</div>
+                        {windowDiffResult.addedNodes.filter(n => n.kind === 'external').slice(0, 4).map(n => (
+                          <button key={n.ip} type="button" className="windowNodeRow" onClick={() => setSelectedIp(n.ip)}>
+                            <span className="windowNodeIp">{n.ip}</span>
+                            <span className="windowBadge ext">ext</span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div className="windowSection">
+                      <div className="windowSectionTitle">Protocols</div>
+                      {windowAnalysis.protocols.slice(0, 5).map(p => {
+                        const delta = windowDiffResult?.protocolDeltas.find(d => d.proto === p.proto)
+                        return (
+                          <div key={p.proto} className="windowProtoRow">
+                            <span>{p.proto}</span>
+                            <span>{p.packets} pkts</span>
+                            {delta && Math.abs(delta.pctChange) > 10 && (
+                              <span className="windowBadge chg">{delta.pctChange > 0 ? '+' : ''}{delta.pctChange}%</span>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
                 ) : rightPanelOpen ? (
                   /* Top Talkers view (default when no node selected) */
                   <>
@@ -2975,21 +3849,70 @@ export default function App() {
               </button>
             )}
 
-            {/* Feature 3 — Bottom timeline strip */}
+            {/* Bottom timeline strip */}
             {!screensaverActive && (
               <div className="timelineStrip">
-                <canvas ref={sparklineRef} className="sparkline" width="600" height="44" />
-                {activeSource === 'replay' && replayMeta && (
-                  <input
-                    className="timelineScrubber"
-                    type="range"
-                    min="0"
-                    max={Math.max(replayMeta.duration, 0.1)}
-                    step="0.1"
-                    value={Math.min(replayTime, Math.max(replayMeta.duration, 0.1))}
-                    onChange={(event) => scrubReplay(event.target.value)}
-                  />
-                )}
+                {(() => {
+                  const bounds = timelineBounds ?? (activeSource === 'replay' && replayMeta ? { min: 0, max: replayMeta.duration } : null)
+                  if (!bounds) return null
+                  const span     = bounds.max - bounds.min
+                  const leftPct  = timeRange ? ((timeRange.start - bounds.min) / span) * 100 : null
+                  const rightPct = timeRange ? ((timeRange.end   - bounds.min) / span) * 100 : null
+                  const scrubberT = activeSource === 'replay'
+                    ? replayTime
+                    : (liveTime ?? bounds.max ?? null)
+                  const playPct = scrubberT != null && span > 0
+                    ? Math.max(0, Math.min(100, ((scrubberT - bounds.min) / span) * 100))
+                    : null
+                  const rel = t => t - (activeSource === 'replay' ? 0 : bounds.min)
+
+                  return (
+                    <div className="utlBody">
+                      <span className="utlTime">
+                        {timeRange ? formatReplayTime(rel(timeRange.start)) : (scrubberT != null ? formatReplayTime(rel(scrubberT)) : '')}
+                      </span>
+                      <div
+                        className="utlTrack"
+                        ref={trackRef}
+                        onPointerDown={handleTimelinePointerDown}
+                        onPointerMove={handleTimelinePointerMove}
+                        onPointerUp={handleTimelinePointerUp}
+                        onPointerCancel={handleTimelinePointerUp}
+                      >
+                        {leftPct  != null && <div className="utlDimLeft"  style={{ width: `${leftPct}%` }} />}
+                        {rightPct != null && <div className="utlDimRight" style={{ left: `${rightPct}%`, width: `${100 - rightPct}%` }} />}
+                        {leftPct != null && rightPct != null && (
+                          <div className="utlWindowFill" style={{ left: `${leftPct}%`, width: `${rightPct - leftPct}%` }} />
+                        )}
+                        {leftPct  != null && <div className="utlHandle utlHandleLeft"  style={{ left: `${leftPct}%` }} />}
+                        {rightPct != null && <div className="utlHandle utlHandleRight" style={{ left: `${rightPct}%` }} />}
+                        {playPct  != null && <div className="utlPlayhead" style={{ left: `${playPct}%` }} />}
+                      </div>
+                      <span className="utlTime">
+                        {timeRange ? formatReplayTime(rel(timeRange.end)) : formatReplayTime(span)}
+                      </span>
+                      {timeRange && (
+                        <>
+                          <button type="button" className="timelineBtn"
+                            onClick={() => { setTimeRange(null); setWindowCompareActive(false) }}>Clear</button>
+                          {hasBaseWindow
+                            ? <button type="button"
+                                className={`timelineBtn${windowCompareActive ? ' active' : ''}`}
+                                onClick={() => setWindowCompareActive(v => !v)}>
+                                {windowCompareActive ? 'Comparing' : 'Compare'}
+                              </button>
+                            : <span className="timelineBtnDisabled">Select window</span>
+                          }
+                        </>
+                      )}
+                      {activeSource === 'live' && liveTime !== null && !timeRange && (
+                        <button type="button" className="timelineBtn active" onClick={() => setLiveTime(null)}>
+                          ▶ Live
+                        </button>
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
             )}
           </section>
