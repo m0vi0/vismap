@@ -974,6 +974,7 @@ export default function App() {
 
   // Feature 4 — protocol toggles
   const [activeProtocols, setActiveProtocols] = useState(() => new Set(['TCP','UDP','DNS','ARP','BCAST','MCAST','OTHER']))
+  const activeProtocolsRef = useRef(activeProtocols)
 
   // Feature 2 — inspection drawer
   const [drawerTab, setDrawerTab] = useState('overview')
@@ -1235,6 +1236,10 @@ export default function App() {
   }, [activeFilter])
 
   useEffect(() => {
+    activeProtocolsRef.current = activeProtocols
+  }, [activeProtocols])
+
+  useEffect(() => {
     filteredPacketsRef.current = filteredPackets
   }, [filteredPackets])
 
@@ -1273,7 +1278,7 @@ export default function App() {
       const packets = livePacketsRef.current.filter(p => {
         if (p.timestamp > liveTime) return false
         const group = packetProtocolGroup(p)
-        if (!activeProtocols.has(group)) return false
+        if (!activeProtocolsRef.current.has(group)) return false
         return packetMatchesFilter(p, activeFilterRef.current)
       })
       windowRebuildTimerRef.current = setTimeout(() => {
@@ -1284,7 +1289,7 @@ export default function App() {
       rebuildGraphRef.current(filteredPacketsRef.current)
     }
     return () => { if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current) }
-  }, [liveTime, activeSource, activeFilter, activeProtocols, timeRange])
+  }, [liveTime, activeSource, activeFilter, timeRange])
 
   // Apply/clear diff visuals when window compare result changes
   useEffect(() => {
@@ -1815,6 +1820,20 @@ export default function App() {
         }
       }
 
+      // Path trace: bias path nodes into a horizontal line (src → dst left → right)
+      const pt = pathTraceRef.current
+      if (pt?.found && pt.pathIps.length > 1) {
+        const spacing = 100 * spreadForce
+        const mid = (pt.pathIps.length - 1) / 2
+        pt.pathIps.forEach((ip, i) => {
+          const node = nodeStore.get(ip)
+          if (!node || !node.group.visible) return
+          node.vx += ((i - mid) * spacing - node.x) * 0.045
+          node.vy += (0 - node.y) * 0.045
+          node.vz += (0 - node.z) * 0.045
+        })
+      }
+
       visibleNodes.forEach((node) => {
         if (!node.group.visible) return
         node.vx *= 0.84
@@ -1937,6 +1956,8 @@ export default function App() {
       const pathActive = pt?.found === true
       const pathIpSet = pathActive ? new Set(pt.pathIps) : null
       const pathEdgeKeys = pathActive ? pt.pathEdgeKeys : null
+      const pathSrcIp = pathActive ? pt.pathIps[0] : null
+      const pathDstIp = pathActive ? pt.pathIps[pt.pathIps.length - 1] : null
 
       nodeList.forEach((node) => {
         const labelsEnabled = showLabelsRef.current
@@ -2036,17 +2057,21 @@ export default function App() {
           }
         }
 
-        // Path trace — cyan highlight for path nodes, dim everything else
+        // Path trace — highlight path nodes, strongly dim everything else
         if (pathActive) {
           if (pathIpSet.has(node.ip)) {
-            node.mesh.material.emissive.setHex(0x22d3ee)
-            node.mesh.material.emissiveIntensity = 1.0
+            // Source = green, destination = amber, intermediates = cyan
+            const pathColor = node.ip === pathSrcIp ? 0x4ade80
+              : node.ip === pathDstIp ? 0xfbbf24
+              : 0x22d3ee
+            node.mesh.material.emissive.setHex(pathColor)
+            node.mesh.material.emissiveIntensity = 1.2
             node.mesh.material.opacity = 1.0
-            node.ring.material.color.setHex(0x22d3ee)
-            node.ring.material.opacity = 0.75
+            node.ring.material.color.setHex(pathColor)
+            node.ring.material.opacity = 0.85
           } else {
-            node.mesh.material.emissiveIntensity = 0.05
-            node.mesh.material.opacity = THREE.MathUtils.lerp(node.mesh.material.opacity, 0.12, 0.1)
+            node.mesh.material.emissiveIntensity = 0.02
+            node.mesh.material.opacity = THREE.MathUtils.lerp(node.mesh.material.opacity, 0.04, 0.1)
             node.ring.material.opacity = 0
           }
         }
@@ -2115,13 +2140,13 @@ export default function App() {
           }
         }
 
-        // Path trace — cyan for path edges, near-invisible for everything else
+        // Path trace — cyan for path edges, invisible for everything else
         if (pathActive) {
           if (pathEdgeKeys.has(edge.key)) {
             edge.mesh.material.color.setHex(0x22d3ee)
-            edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.92, 0.12)
+            edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.95, 0.18)
           } else {
-            edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.03, 0.1)
+            edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, 0.01, 0.12)
           }
         }
 
@@ -2432,7 +2457,7 @@ export default function App() {
             setLivePackets([...livePacketsRef.current])
           }, LIVE_PACKET_UI_FLUSH_MS)
         }
-        if (appModeRef.current === 'live' && activeSourceRef.current === 'live' && packetMatchesFilter(packet, activeFilterRef.current) && !timeRangeRef.current && !liveTimeRef.current) {
+        if (appModeRef.current === 'live' && activeSourceRef.current === 'live' && activeProtocolsRef.current.has(packetProtocolGroup(packet)) && packetMatchesFilter(packet, activeFilterRef.current) && !timeRangeRef.current && !liveTimeRef.current) {
           ingestPacket(packet)
         }
       }
@@ -3108,8 +3133,6 @@ export default function App() {
     })
     return best ? { ip: best, count: bestCount } : null
   })()
-  const recentAlerts = alertsRef.current.slice(-5).reverse()
-  const alertCount = alertsRef.current.length
   const filteredCheckpoints = checkpoints.filter(c => !c.source || c.source === activeSource)
 
   const nodeInspectionData = useMemo(() => {
@@ -3379,18 +3402,6 @@ export default function App() {
                   <button className="chip" type="button" onClick={() => setSelectedIp(mostPeers.ip)}>
                     Most Peers: <strong>{mostPeers.ip}</strong> ({mostPeers.count})
                   </button>
-                )}
-                {alertCount > 0 && (
-                  <div className="chip chipAlert">
-                    Alerts: <strong>{alertCount}</strong>
-                    <div className="alertDropdown">
-                      {recentAlerts.map((a, i) => (
-                        <button key={i} type="button" onClick={() => setSelectedIp(a.ip)}>
-                          {a.label} — {a.ip}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
                 )}
               </div>
             )}
