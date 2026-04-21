@@ -25,6 +25,8 @@ const PROTOCOLS = {
   DNS: { color: 0xfacc15, css: '#facc15', label: 'DNS' },
   ARP: { color: 0xfb7185, css: '#fb7185', label: 'ARP' },
   OTHER: { color: 0xc084fc, css: '#c084fc', label: 'Other' },
+  BCAST: { color: 0x94a3b8, css: '#94a3b8', label: 'BCast' },
+  MCAST: { color: 0xf97316, css: '#f97316', label: 'MCast' },
 }
 
 const TABS = {
@@ -1005,6 +1007,7 @@ export default function App() {
   const timeRangeRef = useRef(null) // sync for WebSocket closure gating
   const [windowCompareActive, setWindowCompareActive] = useState(false)
   const windowRebuildTimerRef = useRef(null)
+  const [isDraggingTimeline, setIsDraggingTimeline] = useState(false)
   const trackRef = useRef(null)
   const dragStateRef = useRef({
     mode: null,  // 'playhead' | 'windowLeft' | 'windowRight' | 'windowBody' | 'drawing' | 'playheadOrDraw'
@@ -1205,6 +1208,7 @@ export default function App() {
   useEffect(() => {
     if (!rebuildGraphRef.current) return
     if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current)
+    if (isDraggingTimeline) return   // skip rebuild; diff already updates continuously
 
     if (timeRange !== null && windowPackets !== null) {
       // When replay is actively playing, the existing ingest loop handles graph updates.
@@ -1219,12 +1223,13 @@ export default function App() {
     }
 
     return () => { if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current) }
-  }, [timeRange, windowPackets, activeSource, replayState])
+  }, [timeRange, windowPackets, activeSource, replayState, isDraggingTimeline])
 
   // Live mode history scrubber — rebuild graph frozen at liveTime (or return to live edge)
   useEffect(() => {
     if (activeSource !== 'live' || timeRange !== null || !rebuildGraphRef.current) return
     if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current)
+    if (isDraggingTimeline) return   // skip rebuild during scrub
 
     if (liveTime !== null) {
       const packets = livePacketsRef.current.filter(p => {
@@ -1241,7 +1246,7 @@ export default function App() {
       rebuildGraphRef.current(filteredPacketsRef.current)
     }
     return () => { if (windowRebuildTimerRef.current) clearTimeout(windowRebuildTimerRef.current) }
-  }, [liveTime, activeSource, activeFilter, timeRange])
+  }, [liveTime, activeSource, activeFilter, timeRange, isDraggingTimeline])
 
   // Apply/clear diff visuals when window compare result changes
   useEffect(() => {
@@ -1829,6 +1834,7 @@ export default function App() {
 
       const size = Number(packet.size) || 0
       const proto = packet.proto || 'OTHER'
+      const protoGroup = packetProtocolGroup(packet)
 
       // Feature 6 — track DNS servers (responses come FROM port 53)
       if (proto === 'DNS' && (Number(packet.srcPort) === 53)) {
@@ -1887,7 +1893,7 @@ export default function App() {
       edge.recentBytes += size
       edge.recentPackets += 1
 
-      spawnPacket(src, dst, proto, size)
+      spawnPacket(src, dst, protoGroup, size)
     }
 
     function applyNodeSummary(summaryNodes) {
@@ -2638,6 +2644,7 @@ export default function App() {
     if (!timelineBounds || !trackRef.current) return
     e.currentTarget.setPointerCapture(e.pointerId)
     const ds = dragStateRef.current
+    setIsDraggingTimeline(true)
     ds.frozenBounds = { ...timelineBounds }  // freeze bounds so live data can't shift the playhead mid-drag
     const rect = trackRef.current.getBoundingClientRect()
     const span = ds.frozenBounds.max - ds.frozenBounds.min
@@ -2739,6 +2746,7 @@ export default function App() {
     ds.frozenBounds = null
     ds.mode = null
     ds.movedEnough = false
+    setIsDraggingTimeline(false)
   }
 
   function scrubReplay(value) {
@@ -3011,6 +3019,7 @@ export default function App() {
                     key={proto}
                     type="button"
                     className={`dockProtoChip${activeProtocols.has(proto) ? ' active' : ''}`}
+                    style={{ '--proto-color': (PROTOCOLS[proto] || PROTOCOLS.OTHER).css }}
                     onClick={() => setActiveProtocols(prev => {
                       const next = new Set(prev)
                       next.has(proto) ? next.delete(proto) : next.add(proto)

@@ -584,13 +584,13 @@ button { font: inherit; }
 .dockProtos {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 3px;
+  gap: 6px;
 }
 
 .dockProtoChip {
   height: 22px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--proto-color, #818cf8) 30%, transparent);
+  border-radius: 6px;
   background: transparent;
   color: var(--text-dimmer);
   cursor: pointer;
@@ -599,17 +599,18 @@ button { font: inherit; }
   font-weight: 500;
   letter-spacing: 0.02em;
   padding: 0;
-  text-align: center;
-  transition: border-color 0.1s, background 0.1s, color 0.1s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: border-color 0.1s, color 0.1s;
 }
 .dockProtoChip:hover {
-  border-color: var(--border-bright);
+  border-color: color-mix(in srgb, var(--proto-color, #818cf8) 55%, transparent);
   color: var(--text-dim);
 }
 .dockProtoChip.active {
-  border-color: rgba(129, 140, 248, 0.45);
-  background: rgba(129, 140, 248, 0.1);
-  color: var(--accent);
+  border-color: var(--proto-color, #818cf8);
+  color: var(--text);
 }
 
 .analysisHeader {
