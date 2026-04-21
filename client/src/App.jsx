@@ -6,20 +6,15 @@ import './App.css'
 
 const WS_URL = 'ws://127.0.0.1:8765'
 const MAX_PACKET_PARTICLES = 420
-const NODE_LIMIT = 18
 const LIVE_PACKET_HISTORY_LIMIT = 2000
 const LIVE_PACKET_UI_FLUSH_MS = 1000
 const ANALYSIS_PACKET_WINDOW = 2000
-const TABLE_ROW_LIMIT = 80
-const LARGE_TABLE_ROW_LIMIT = 80
 const ANALYSIS_SNAPSHOT_MS = 1000
 const LIVE_GRAPH_REBUILD_MS = 350
 const TARGET_PIXEL_TOLERANCE = 42
 const REPLAY_TICK_MS = 80
-const MIN_CAMERA_ZOOM = 0.55
-const MAX_CAMERA_ZOOM = 2.5
-const DEFAULT_CAMERA_ZOOM = 1
-const ORBIT_TARGET = new THREE.Vector3(0, 0, 0)
+const MAX_REPLAY_FILE_BYTES = 100 * 1024 * 1024
+const MAX_REPLAY_PACKETS = 100_000
 const MIN_LAYOUT_SPREAD = 0.5
 const MAX_LAYOUT_SPREAD = 2.25
 const PAN_BOUND = 320
@@ -52,19 +47,8 @@ const LABEL_MODES = {
   off: 'Labels off',
 }
 
-function byteLabel(bytes) {
-  if (!bytes) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-}
-
 function edgeKey(src, dst) {
   return [src, dst].sort().join('<>')
-}
-
-function clampZoom(value) {
-  return THREE.MathUtils.clamp(value, MIN_CAMERA_ZOOM, MAX_CAMERA_ZOOM)
 }
 
 function normalizeTimestamp(timestamp, fallback) {
@@ -193,15 +177,6 @@ function formatBytes(b) {
   if (b >= 1048576) return `${(b / 1048576).toFixed(1)}MB`
   if (b >= 1024) return `${(b / 1024).toFixed(1)}KB`
   return `${b}B`
-}
-
-function packetInfo(packet) {
-  const proto = packet.proto || 'OTHER'
-  const ports = packet.srcPort || packet.dstPort ? ` ${packet.srcPort || '?'} -> ${packet.dstPort || '?'}` : ''
-  if (proto === 'DNS') return `DNS${ports}`
-  if (proto === 'TCP' || proto === 'UDP') return `${proto}${ports}`
-  if (proto === 'ARP') return 'ARP who-has / is-at'
-  return proto
 }
 
 function formatMac(view, offset) {
@@ -530,6 +505,10 @@ function parseClassicPcap(view) {
     else skipped += 1
 
     offset += capturedLength
+    if (packets.length >= MAX_REPLAY_PACKETS) {
+      skipped += 1
+      break
+    }
   }
 
   return { packets, skipped, format: 'pcap', linkTypes: [...linkTypes] }
@@ -573,6 +552,10 @@ function parsePcapng(view) {
         else skipped += 1
       } else {
         skipped += 1
+      }
+      if (packets.length >= MAX_REPLAY_PACKETS) {
+        skipped += 1
+        break
       }
     }
 
@@ -913,7 +896,6 @@ export default function App() {
   const filteredPacketsRef = useRef([])
   const showLabelsRef = useRef(true)
   const labelModeRef = useRef('resolvedIp')
-  const cameraZoomRef = useRef(DEFAULT_CAMERA_ZOOM)
   const hostnamesRef = useRef(new Map())
   const macNamesRef = useRef(new Map())
   const cameraRef = useRef(null)
@@ -928,19 +910,6 @@ export default function App() {
   const replayIndexRef = useRef(0)
   const replayPacketsRef = useRef([])
 
-  const [gesturesEnabled, setGesturesEnabled] = useState(false)
-  const gestureCleanupRef = useRef(null)
-  const [pointReticle, setPointReticle] = useState({
-    active: false,
-    locked: false,
-    x: 50,
-    y: 50,
-    lockKind: null,
-    lockProgress: 0,
-    mode: 'zoom',
-  })
-
-  const applyOrbitRef = useRef(() => { })
   const screensaverActiveRef = useRef(false)
   const [screensaverActive, setScreensaverActive] = useState(false)
   const screensaverRef = useRef({ timer: null, spinAngle: 0 })
@@ -952,13 +921,9 @@ export default function App() {
   const [filterError, setFilterError] = useState('')
   const [filterSuggestions, setFilterSuggestions] = useState([])
   const [suggestionIndex, setSuggestionIndex] = useState(-1)
-  const [cameraZoom, setCameraZoom] = useState(DEFAULT_CAMERA_ZOOM)
-  const [showLabels, setShowLabels] = useState(true)
-  const [labelMode, setLabelMode] = useState('resolvedIp')
   const [status, setStatus] = useState('connecting')
   const [captureInterface, setCaptureInterface] = useState('en0')
   const [selectedIp, setSelectedIp] = useState(null)
-  const [selectedPacketId, setSelectedPacketId] = useState(null)
   const conversationSort = 'bytes'
   const [replayPackets, setReplayPackets] = useState([])
   const [livePackets, setLivePackets] = useState([])
@@ -996,7 +961,7 @@ export default function App() {
     try { return JSON.parse(localStorage.getItem('pacmap_checkpoints') || '[]') }
     catch { return [] }
   })
-  const [checkpointPanelOpen, setCheckpointPanelOpen] = useState(false)
+  const [rightPanelTab, setRightPanelTab] = useState('checkpoints')  // 'checkpoints' | 'mostpeers' | 'toptalkers' | 'diff'
   const [activeDiff, setActiveDiff] = useState(null)
 
   // Checkpoint label UI state
@@ -1025,10 +990,7 @@ export default function App() {
   const pathTraceRef = useRef(null)
   const [liveAnalysisCollapsed, setLiveAnalysisCollapsed] = useState(false)
 
-  // Reference Snapshot — pointer to one checkpoint ID, persisted
-  const [referenceId, setReferenceId] = useState(() =>
-    localStorage.getItem('pacmap_reference_id') || null
-  )
+
 
   // Traffic De-emphasis — view-layer-only opacity reduction for BCAST/MCAST
   const [deemphasizeGroups, setDeemphasizeGroups] = useState(new Set())
@@ -1050,6 +1012,7 @@ export default function App() {
     startWindowStart: 0,
     startWindowEnd: 0,
     movedEnough: false,
+    frozenBounds: null,  // snapshot of timelineBounds at drag start, prevents live data from shifting playhead
   })
 
   // Bridge refs — assigned inside Three.js useEffect closure (where nodeStore/edgeStore live)
@@ -1072,12 +1035,6 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('pacmap_checkpoints', JSON.stringify(checkpoints.slice(-50)))
   }, [checkpoints])
-
-  // Persist reference ID to localStorage
-  useEffect(() => {
-    if (referenceId) localStorage.setItem('pacmap_reference_id', referenceId)
-    else localStorage.removeItem('pacmap_reference_id')
-  }, [referenceId])
 
   // Sync deemphasizeGroups to ref for Three.js animation loop
   useEffect(() => {
@@ -1180,7 +1137,7 @@ export default function App() {
       if (!activeProtocols.has(group)) return false
       return packetMatchesFilter(p, activeFilter)
     })
-  }, [timeRange, allAvailablePackets, activeSource, activeProtocols, activeFilter, activeScrubberTime, timelineBounds])
+  }, [timeRange, allAvailablePackets, activeSource, activeProtocols, activeFilter, activeScrubberTime])
 
   // Baseline: all packets before the window opened (empty base = all window packets are "new")
   const baseWindowPackets = useMemo(() => {
@@ -1207,11 +1164,6 @@ export default function App() {
     if (!timeRange || !windowPackets) return null
     return buildTrafficAnalysis(windowPackets, null, 'bytes')
   }, [timeRange, windowPackets])
-
-  const selectedPacket = useMemo(
-    () => filteredPackets.find((packet) => packet.id === selectedPacketId) || null,
-    [filteredPackets, selectedPacketId],
-  )
 
   const trafficAnalysis = analysisSnapshot
 
@@ -1307,7 +1259,7 @@ export default function App() {
     setWindowCompareActive(false)
     setLiveTime(null)
     setActiveDiff(null)
-    setReferenceId(null)
+    setRightPanelTab('checkpoints')
   }, [activeSource])
 
   useEffect(() => {
@@ -1354,13 +1306,17 @@ export default function App() {
     setDiffReasonTooltipRef.current = setDiffReasonTooltip
   }, [activeDiff])
 
-  // Keep "vs Current" diff live in live mode: re-diff whenever the graph state changes
+  // Keep "vs Current" diff live as graph state changes.
   useEffect(() => {
     const ad = activeDiffRef.current
-    if (!ad || ad.compareId !== 'current' || activeSource !== 'live') return
+    if (!ad || ad.compareId !== 'current') return
     const base = checkpoints.find(c => c.id === ad.baseId) || null
     const compare = buildCurrentState()
-    if (!base || !compare) return
+    if (!base || !compare) {
+      setActiveDiff(null)
+      clearDiffStateRef.current?.()
+      return
+    }
     const result = computeCheckpointDiff(base, compare)
     setActiveDiff(prev => prev ? { ...prev, result } : null)
     applyDiffStateRef.current?.(result)
@@ -1368,35 +1324,20 @@ export default function App() {
   }, [analysisSnapshot, activeSource])
 
   useEffect(() => {
-    showLabelsRef.current = showLabels
-  }, [showLabels])
-
-  useEffect(() => {
-    labelModeRef.current = labelMode
-    setShowLabels(labelMode !== 'off')
-  }, [labelMode])
-
-  useEffect(() => {
     hostnamesRef.current = trafficAnalysis.hostnames
     macNamesRef.current = trafficAnalysis.macNames
   }, [trafficAnalysis.hostnames, trafficAnalysis.macNames])
 
   useEffect(() => {
-    if (!cameraRef.current) return
-    cameraZoomRef.current = cameraZoom
-    cameraRef.current.zoom = cameraZoom
-    cameraRef.current.updateProjectionMatrix()
-  }, [cameraZoom])
-
-  useEffect(() => {
+    const screensaver = screensaverRef.current
     function resetTimer() {
-      if (screensaverRef.current.timer) clearTimeout(screensaverRef.current.timer)
+      if (screensaver.timer) clearTimeout(screensaver.timer)
       if (screensaverActiveRef.current) {
         screensaverActiveRef.current = false
         setScreensaverActive(false)
-        screensaverRef.current.initialized = false
+        screensaver.initialized = false
       }
-      screensaverRef.current.timer = setTimeout(() => {
+      screensaver.timer = setTimeout(() => {
         screensaverActiveRef.current = true
         setScreensaverActive(true)
         setActiveTab('live')
@@ -1409,24 +1350,27 @@ export default function App() {
 
     return () => {
       events.forEach(e => window.removeEventListener(e, resetTimer))
-      if (screensaverRef.current.timer) clearTimeout(screensaverRef.current.timer)
+      if (screensaver.timer) clearTimeout(screensaver.timer)
     }
   }, [])
 
   useEffect(() => {
     const mount = mountRef.current
+    if (!mount) return undefined
     const nodeStore = nodesRef.current
     const edgeStore = edgesRef.current
     const packetStore = packetsRef.current
     const scene = new THREE.Scene()
     scene.background = new THREE.Color(0x050505)
 
-    const camera = new THREE.PerspectiveCamera(55, mount.clientWidth / mount.clientHeight, 1, 4000)
+    const mountWidth = Math.max(mount.clientWidth, 1)
+    const mountHeight = Math.max(mount.clientHeight, 1)
+    const camera = new THREE.PerspectiveCamera(55, mountWidth / mountHeight, 1, 4000)
     camera.position.set(0, 620, 520)
     cameraRef.current = camera
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true })
-    renderer.setSize(mount.clientWidth, mount.clientHeight)
+    renderer.setSize(mountWidth, mountHeight)
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
     mount.appendChild(renderer.domElement)
@@ -1486,12 +1430,16 @@ export default function App() {
     scene.add(rimLight)
 
     const nodeGeometry = new THREE.SphereGeometry(8, 20, 14)
+    const nodeHitGeometry = new THREE.SphereGeometry(13, 6, 3)
+    const nodeHitMaterial = new THREE.MeshBasicMaterial({ visible: false })
     const packetGeometry = new THREE.SphereGeometry(1.4, 10, 10)
     const raycaster = new THREE.Raycaster()
 
     // Scratch objects for ring billboarding — reused every frame, zero allocations
     const _spinQ = new THREE.Quaternion()
     const _zAxis = new THREE.Vector3(0, 0, 1)
+    const _scaleVec = new THREE.Vector3()
+    const _pointVec = new THREE.Vector3()
     const pointer = new THREE.Vector2()
 
     function updateOrbitTarget() {
@@ -1518,7 +1466,7 @@ export default function App() {
       // When path tracing is active, render only the hop packets so intermediate
       // nodes exist in the scene and can be highlighted cyan.
       const pt = pathTraceRef.current
-      if (pt?.found) {
+      if (pt?.found && extractPathEndpoints(activeFilterRef.current)) {
         const allPkts = activeSourceRef.current === 'replay' ? replayPacketsRef.current : livePacketsRef.current
         const pathEdgeKeySet = pt.pathEdgeKeys
         packets = allPkts.filter(pkt => {
@@ -1597,7 +1545,6 @@ export default function App() {
       nodeStore.clear()
       setSelectedIp(null)
       pointTargetRef.current = { active: false, ip: null, x: 0, y: 0 }
-      setPointReticle((current) => ({ ...current, active: false, locked: false }))
 
       if (!soft) {
         controls.target.set(0, 0, 0)
@@ -1629,6 +1576,10 @@ export default function App() {
       mesh.userData.ip = ip
       group.add(mesh)
 
+      const hitMesh = new THREE.Mesh(nodeHitGeometry, nodeHitMaterial)
+      hitMesh.userData.ip = ip
+      group.add(hitMesh)
+
       const label = makeTextSprite(ip)
       label.position.set(0, 19, 0)
       group.add(label)
@@ -1644,6 +1595,7 @@ export default function App() {
         ip,
         group,
         mesh,
+        hitMesh,
         label,
         ring,
         x: position.x,
@@ -1726,11 +1678,11 @@ export default function App() {
       const pointTarget = pointTargetRef.current
       const depths = pointTarget.active && pointTarget.ip ? focusDepths(pointTarget.ip) : new Map()
       const hasFocus = depths.size > 0
-      const visibleNodes = nodeList.filter((node) => (adjacency.get(node.ip)?.size || 0) > 0)
+      const visibleNodes = nodeList.filter((node) => (adjacency.get(node.ip)?.size || 0) > 0 || node.packets > 0)
 
       nodeList.forEach((node) => {
         const degree = adjacency.get(node.ip)?.size || 0
-        node.group.visible = degree > 0
+        node.group.visible = degree > 0 || node.packets > 0
         node.renderScale = 1
         if (!node.group.visible) return
 
@@ -1940,7 +1892,7 @@ export default function App() {
 
     function applyNodeSummary(summaryNodes) {
       summaryNodes.forEach((summary) => {
-        const node = nodeStore.get(summary.ip)
+        const node = nodeStore.get(summary.ip) || (activeFilterRef.current?.type === 'all' ? ensureNode(summary.ip) : null)
         if (!node) return
         node.bytes = Math.max(node.bytes, Number(summary.bytes) || 0)
         node.packets = Math.max(node.packets, Number(summary.packets) || 0)
@@ -1958,6 +1910,8 @@ export default function App() {
       const pathEdgeKeys = pathActive ? pt.pathEdgeKeys : null
       const pathSrcIp = pathActive ? pt.pathIps[0] : null
       const pathDstIp = pathActive ? pt.pathIps[pt.pathIps.length - 1] : null
+      const maxBytes = Math.max(...nodeList.map(n => n.bytes), 1)
+      const maxEdgeBytes = Math.max(...edgeList.map(e => e.bytes), 1)
 
       nodeList.forEach((node) => {
         const labelsEnabled = showLabelsRef.current
@@ -1965,12 +1919,6 @@ export default function App() {
         const visibleWeight = hasFocus
           ? { 0: 1, 1: 0.96 }[depth] || 0.14
           : 1
-        const zoomOutVisibility = THREE.MathUtils.clamp(
-          (DEFAULT_CAMERA_ZOOM - cameraZoomRef.current) / (DEFAULT_CAMERA_ZOOM - MIN_CAMERA_ZOOM),
-          0,
-          1,
-        )
-        const labelOpacityFloor = 0.82 + zoomOutVisibility * 0.16
         const scale = (nodeRadius(node) / 8) * nodeRenderScale(node)
         const labelScale = THREE.MathUtils.clamp(nodeRenderScale(node), 0.55, 1)
         const pulse = THREE.MathUtils.clamp(node.recentBytes / 4500, 0, 1.8)
@@ -1981,10 +1929,9 @@ export default function App() {
           : 0
         refreshNodeLabel(node)
         node.group.position.set(node.x, node.y, node.z)
-        node.mesh.scale.lerp(new THREE.Vector3(scale + pulse + diffScalePulse, scale + pulse + diffScalePulse, scale + pulse + diffScalePulse), 0.18)
+        node.mesh.scale.lerp(_scaleVec.setScalar(scale + pulse + diffScalePulse), 0.18)
         node.mesh.material.opacity = THREE.MathUtils.lerp(node.mesh.material.opacity, visibleWeight, 0.12)
         node.label.visible = labelsEnabled
-        const maxBytes = Math.max(...[...nodeStore.values()].map(n => n.bytes), 1)
         const importance = Math.log10(node.bytes + 1) / Math.log10(maxBytes + 1)
         const importanceOpacity = THREE.MathUtils.clamp(importance, 0.08, 1)
         const targetLabelOpacity = !labelsEnabled || (hasFocus && depth === undefined)
@@ -1999,7 +1946,7 @@ export default function App() {
           0.14,
         )
         node.label.position.y = 22 + scale * 7
-        node.label.scale.lerp(new THREE.Vector3(150 * labelScale, 38 * labelScale, 1), 0.18)
+        node.label.scale.lerp(_scaleVec.set(150 * labelScale, 38 * labelScale, 1), 0.18)
         node.recentBytes *= 0.91
 
         // Emissive glow: depth focus first, then diff state overrides
@@ -2107,7 +2054,6 @@ export default function App() {
         const packetChattyness = THREE.MathUtils.clamp(Math.log1p(edge.recentPackets) / Math.log1p(9), 0, 1)
         const byteChattyness = THREE.MathUtils.clamp(Math.log1p(edge.recentBytes) / Math.log1p(9000), 0, 1)
         const chattyness = THREE.MathUtils.clamp(packetChattyness * 0.68 + byteChattyness * 0.32, 0, 1)
-        const maxEdgeBytes = Math.max(...[...edgeStore.values()].map(e => e.bytes), 1)
         const edgeImportance = Math.log10(edge.bytes + 1) / Math.log10(maxEdgeBytes + 1)
         const baseOpacity = focusedEdge ? THREE.MathUtils.clamp(edgeImportance * 0.18, 0.01, 0.18) : 0.02
         const activeOpacity = focusedEdge ? THREE.MathUtils.clamp(edgeImportance * 0.9 + 0.1, 0.1, 0.96) : 0.12
@@ -2116,7 +2062,6 @@ export default function App() {
         positions.setXYZ(0, a.x, a.y, a.z)
         positions.setXYZ(1, b.x, b.y, b.z)
         positions.needsUpdate = true
-        edge.mesh.geometry.computeBoundingSphere()
         edge.mesh.material.opacity = THREE.MathUtils.lerp(edge.mesh.material.opacity, targetOpacity, 0.12)
 
         // VIEW-LAYER DE-EMPHASIS ONLY (same guarantee as node de-emphasis above)
@@ -2165,6 +2110,7 @@ export default function App() {
         const dst = nodeStore.get(packet.dst)
         if (!src || !dst || !src.group.visible || !dst.group.visible) {
           scene.remove(packet.mesh)
+          packet.mesh.material.dispose()
           remove.push(index)
           return
         }
@@ -2172,7 +2118,6 @@ export default function App() {
         packet.progress += packet.speed
         if (packet.progress >= 1) {
           scene.remove(packet.mesh)
-          packet.mesh.geometry.dispose()
           packet.mesh.material.dispose()
           remove.push(index)
           return
@@ -2278,7 +2223,7 @@ export default function App() {
       _frustum.setFromProjectionMatrix(
         new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
       )
-      const inFrustum = (n) => _frustum.containsPoint(new THREE.Vector3(n.x, n.y, n.z))
+      const inFrustum = (n) => _frustum.containsPoint(_pointVec.set(n.x, n.y, n.z))
 
       if (selected && nodeStore.has(selected)) {
         // subcluster mode — cull within neighborhood only
@@ -2295,7 +2240,7 @@ export default function App() {
           .filter(n => n.group.visible && neighbors.has(n.ip) && inFrustum(n))
           .map(n => ({
             node: n,
-            dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
+            dist: cameraPos.distanceTo(_pointVec.set(n.x, n.y, n.z))
           }))
           .sort((a, b) => a.dist - b.dist)
 
@@ -2303,7 +2248,7 @@ export default function App() {
           .filter(n => n.group.visible && !neighbors.has(n.ip))
           .map(n => ({
             node: n,
-            dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
+            dist: cameraPos.distanceTo(_pointVec.set(n.x, n.y, n.z))
           }))
           .sort((a, b) => a.dist - b.dist)
 
@@ -2322,7 +2267,7 @@ export default function App() {
           .filter(n => n.group.visible && inFrustum(n))
           .map(n => ({
             node: n,
-            dist: cameraPos.distanceTo(new THREE.Vector3(n.x, n.y, n.z))
+            dist: cameraPos.distanceTo(_pointVec.set(n.x, n.y, n.z))
           }))
           .sort((a, b) => a.dist - b.dist)
 
@@ -2357,7 +2302,7 @@ export default function App() {
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
       raycaster.setFromCamera(pointer, camera)
-      const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.mesh)
+      const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.hitMesh)
       const hit = raycaster.intersectObjects(meshes, false)[0]
       if (hit?.object?.userData?.ip) {
         pointerLockedIpRef.current = hit.object.userData.ip
@@ -2374,7 +2319,7 @@ export default function App() {
       pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
       pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
       raycaster.setFromCamera(pointer, camera)
-      const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.mesh)
+      const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.hitMesh)
       const hit = raycaster.intersectObjects(meshes, false)[0]
       const ip = hit?.object?.userData?.ip || null
       hoveredIpRef.current = ip
@@ -2416,7 +2361,7 @@ export default function App() {
         pointer.x = ((event.clientX - bounds.left) / bounds.width) * 2 - 1
         pointer.y = -((event.clientY - bounds.top) / bounds.height) * 2 + 1
         raycaster.setFromCamera(pointer, camera)
-        const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.mesh)
+        const meshes = [...nodeStore.values()].filter(n => n.group.visible).map(n => n.hitMesh)
         const hit = raycaster.intersectObjects(meshes, false)[0]
         if (!hit) setSelectedIp(null)
       }
@@ -2466,7 +2411,10 @@ export default function App() {
         if (data.iface && data.iface !== 'default interface') setCaptureInterface(data.iface)
         if (data.status === 'ready') setStatus('ready')
         if (data.status === 'running') setStatus('live')
-        if (data.status === 'error') setStatus('capture_error')
+        if (data.status === 'error') {
+          setStatus('capture_error')
+          console.warn('Capture error:', data.message || 'unknown error')
+        }
       }
     })
 
@@ -2485,6 +2433,8 @@ export default function App() {
       if (orbitActiveCooldown) clearTimeout(orbitActiveCooldown)
       ws.close()
       cancelAnimationFrame(frameRef.current)
+      renderer.domElement.removeEventListener('pointerdown', handlePointerDown)
+      renderer.domElement.removeEventListener('pointerup', handlePointerUp)
       renderer.domElement.removeEventListener('pointermove', handlePointerMove)
       renderer.domElement.removeEventListener('pointerleave', handlePointerLeave)
       window.removeEventListener('resize', handleResize)
@@ -2508,6 +2458,8 @@ export default function App() {
         packet.mesh.material.dispose()
       })
       nodeGeometry.dispose()
+      nodeHitGeometry.dispose()
+      nodeHitMaterial.dispose()
       packetGeometry.dispose()
       ingestPacketRef.current = null
       resetGraphRef.current = null
@@ -2523,162 +2475,6 @@ export default function App() {
       }
     }
   }, [])
-
-  useEffect(() => {
-    if (!gesturesEnabled) {
-      gestureCleanupRef.current?.()
-      gestureCleanupRef.current = null
-      return
-    }
-
-    useEffect(() => {
-      if (!mountRef.current) return
-      const mount = mountRef.current
-      const canvas = mount.querySelector('canvas')
-      if (!canvas) return
-      const observer = new ResizeObserver(() => {
-        if (!cameraRef.current) return
-        cameraRef.current.aspect = mount.clientWidth / mount.clientHeight
-        cameraRef.current.updateProjectionMatrix()
-      })
-      observer.observe(mount)
-      return () => observer.disconnect()
-    }, [])
-
-    const cam = cameraRef
-    const nodes = nodesRef
-
-    import('./useHandGestures.js').then((module) => {
-      const init = module.useHandGestures({
-        cameraRef: cam,
-        layoutSpreadRef,
-        onPointAt: ({
-          active,
-          mode = 'pointer',
-          x,
-          y,
-          lockKind = null,
-          lockProgress = 0,
-          locked = false,
-          selectionLockComplete = false,
-          openHand = false,
-        }) => {
-          if (!active) {
-            const lockedIp = pointerLockedIpRef.current
-            pointTargetRef.current = { active: Boolean(lockedIp), ip: lockedIp, x: 0, y: 0 }
-            setPointReticle((current) => ({
-              ...current,
-              active: false,
-              locked: false,
-              lockKind: null,
-              lockProgress: 0,
-            }))
-            return
-          }
-
-          if (!cam.current) return
-
-          const canvasBounds = mountRef.current?.getBoundingClientRect()
-          const viewportBounds = mountRef.current?.parentElement?.getBoundingClientRect()
-          if (!canvasBounds || !viewportBounds) return
-
-          const pointerPx = {
-            x: ((x + 1) / 2) * canvasBounds.width,
-            y: ((1 - y) / 2) * canvasBounds.height,
-          }
-          const reticleX = canvasBounds.left - viewportBounds.left + pointerPx.x
-          const reticleY = canvasBounds.top - viewportBounds.top + pointerPx.y
-
-          if (openHand) {
-            pointerLockedIpRef.current = null
-            pointTargetRef.current = { active: false, ip: null, x, y }
-            if (selectedIpRef.current) setSelectedIp(null)
-            setPointReticle({
-              active: true,
-              locked: false,
-              x: reticleX,
-              y: reticleY,
-              lockKind: null,
-              lockProgress: 0,
-              mode,
-            })
-            return
-          }
-
-          if (mode !== 'pointer') {
-            const lockedIp = pointerLockedIpRef.current
-            pointTargetRef.current = { active: Boolean(lockedIp), ip: lockedIp, x, y }
-            setPointReticle({
-              active: true,
-              locked: Boolean(lockedIp) || locked,
-              x: reticleX,
-              y: reticleY,
-              lockKind,
-              lockProgress,
-              mode,
-            })
-            return
-          }
-
-          let hitIp = null
-          let bestDistance = TARGET_PIXEL_TOLERANCE * 1.45
-
-          nodes.current.forEach((node) => {
-            if (!node.group.visible) return
-            const projected = new THREE.Vector3(node.x, node.y, node.z).project(cam.current)
-            if (projected.z < -1 || projected.z > 1) return
-            const nodePx = {
-              x: ((projected.x + 1) / 2) * canvasBounds.width,
-              y: ((1 - projected.y) / 2) * canvasBounds.height,
-            }
-            const distance = Math.hypot(nodePx.x - pointerPx.x, nodePx.y - pointerPx.y)
-            if (distance > bestDistance) return
-            bestDistance = distance
-            hitIp = node.ip
-          })
-
-          if (selectionLockComplete && hitIp && !pointerLockedIpRef.current) {
-            pointerLockedIpRef.current = hitIp
-            if (selectedIpRef.current !== hitIp) setSelectedIp(hitIp)
-          }
-
-          const lockedIp = pointerLockedIpRef.current
-          const focusIp = lockedIp || hitIp
-          pointTargetRef.current = { active: Boolean(focusIp), ip: focusIp, x, y }
-
-          if (hitIp) {
-            setPointReticle({
-              active: true,
-              locked: Boolean(lockedIp) || selectionLockComplete,
-              x: reticleX,
-              y: reticleY,
-              lockKind: lockedIp ? null : lockKind,
-              lockProgress: lockedIp ? 0 : lockProgress,
-              mode,
-            })
-          } else {
-            setPointReticle({
-              active: true,
-              locked: Boolean(lockedIp),
-              x: reticleX,
-              y: reticleY,
-              lockKind: null,
-              lockProgress: 0,
-              mode,
-            })
-          }
-        },
-      })
-      init?.().then(cleanup => {
-        gestureCleanupRef.current = cleanup
-      }).catch(err => console.error('Gesture init failed:', err))
-    })
-
-    return () => {
-      gestureCleanupRef.current?.()
-      gestureCleanupRef.current = null
-    }
-  }, [gesturesEnabled])
 
   useEffect(() => {
     if (graphRebuildTimerRef.current !== null) {
@@ -2720,34 +2516,12 @@ export default function App() {
     const allPackets = replayPacketsRef.current
     for (let i = from; i < to && i < allPackets.length; i++) {
       const pkt = allPackets[i]
-      if (packetMatchesFilter(pkt, activeFilterRef.current)) {
+      if (activeProtocolsRef.current.has(packetProtocolGroup(pkt)) && packetMatchesFilter(pkt, activeFilterRef.current)) {
         ingestPacketRef.current(pkt)
       }
     }
     lastIngestedReplayIndexRef.current = to
   }, [replayIndex, activeSource])
-
-  useEffect(() => {
-    if (selectedPacketId && !filteredPackets.some((packet) => packet.id === selectedPacketId)) {
-      setSelectedPacketId(null)
-    }
-  }, [filteredPackets, selectedPacketId])
-
-  function requestCapture() {
-    setActiveTab('live')
-    setAppMode('live')
-    setActiveSource('live')
-    setReplayState('idle')
-    resetGraphRef.current?.()
-
-    if (websocketRef.current?.readyState !== WebSocket.OPEN) {
-      setStatus('offline')
-      return
-    }
-
-    setStatus('starting')
-    websocketRef.current.send(JSON.stringify({ type: 'start_capture' }))
-  }
 
   function handleFilterInput(e) {
     const val = e.target.value
@@ -2798,12 +2572,6 @@ export default function App() {
     }
   }
 
-  function clearDisplayFilter() {
-    setFilterInput('')
-    setActiveFilter({ raw: '', type: 'all' })
-    setFilterError('')
-  }
-
   async function handleReplayFile(event) {
     const file = event.target.files?.[0]
     if (!file) return
@@ -2818,6 +2586,9 @@ export default function App() {
     resetGraphRef.current?.()
 
     try {
+      if (file.size > MAX_REPLAY_FILE_BYTES) {
+        throw new Error(`Capture file is too large for browser replay. Use a file under ${Math.round(MAX_REPLAY_FILE_BYTES / 1024 / 1024)} MB.`)
+      }
       const parsed = parseCaptureBuffer(await file.arrayBuffer())
       const normalizedReplayPackets = parsed.packets.map((packet, index) => normalizePacket(packet, 'replay', index))
       setReplayPackets(normalizedReplayPackets)
@@ -2866,26 +2637,27 @@ export default function App() {
   function handleTimelinePointerDown(e) {
     if (!timelineBounds || !trackRef.current) return
     e.currentTarget.setPointerCapture(e.pointerId)
+    const ds = dragStateRef.current
+    ds.frozenBounds = { ...timelineBounds }  // freeze bounds so live data can't shift the playhead mid-drag
     const rect = trackRef.current.getBoundingClientRect()
-    const span = timelineBounds.max - timelineBounds.min
+    const span = ds.frozenBounds.max - ds.frozenBounds.min
     const x = e.clientX - rect.left
     const W = rect.width
-    const tAtX = timelineBounds.min + Math.max(0, Math.min(1, x / W)) * span
-    const ds = dragStateRef.current
+    const tAtX = ds.frozenBounds.min + Math.max(0, Math.min(1, x / W)) * span
     ds.startTime = tAtX
     ds.movedEnough = false
 
     if (timeRange) {
-      const leftPx  = ((timeRange.start - timelineBounds.min) / span) * W
-      const rightPx = ((timeRange.end   - timelineBounds.min) / span) * W
+      const leftPx  = ((timeRange.start - ds.frozenBounds.min) / span) * W
+      const rightPx = ((timeRange.end   - ds.frozenBounds.min) / span) * W
       {
-        const scrubT0 = activeSource === 'replay' ? replayTime : (liveTime ?? timelineBounds.max)
-        const playPx = ((scrubT0 - timelineBounds.min) / span) * W
-        if (Math.abs(x - playPx) <= 7) { ds.mode = 'playhead'; return }
+        const scrubT0 = activeSource === 'replay' ? replayTime : (liveTime ?? ds.frozenBounds.max)
+        const playPx = ((scrubT0 - ds.frozenBounds.min) / span) * W
+        if (Math.abs(x - playPx) <= 14) { ds.mode = 'playhead'; return }
       }
-      if (Math.abs(x - leftPx)  <= 9) { ds.mode = 'windowLeft';  return }
-      if (Math.abs(x - rightPx) <= 9) { ds.mode = 'windowRight'; return }
-      if (x > leftPx + 9 && x < rightPx - 9) {
+      if (Math.abs(x - leftPx)  <= 16) { ds.mode = 'windowLeft';  return }
+      if (Math.abs(x - rightPx) <= 16) { ds.mode = 'windowRight'; return }
+      if (x > leftPx + 16 && x < rightPx - 16) {
         ds.mode = 'windowBody'
         ds.startWindowStart = timeRange.start
         ds.startWindowEnd   = timeRange.end
@@ -2898,10 +2670,11 @@ export default function App() {
 
   function handleTimelinePointerMove(e) {
     const ds = dragStateRef.current
-    if (!ds.mode || !timelineBounds || !trackRef.current) return
+    const bounds = ds.frozenBounds || timelineBounds
+    if (!ds.mode || !bounds || !trackRef.current) return
     const rect = trackRef.current.getBoundingClientRect()
-    const span = timelineBounds.max - timelineBounds.min
-    const t = timelineBounds.min + Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * span
+    const span = bounds.max - bounds.min
+    const t = bounds.min + Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * span
     const threshold = span * 0.008
 
     if (ds.mode === 'playheadOrDraw' && Math.abs(t - ds.startTime) > threshold) {
@@ -2919,22 +2692,22 @@ export default function App() {
         break
       }
       case 'windowLeft':
-        setTimeRange(r => r ? { ...r, start: Math.max(timelineBounds.min, Math.min(t, r.end - threshold)) } : r)
+        setTimeRange(r => r ? { ...r, start: Math.max(bounds.min, Math.min(t, r.end - threshold)) } : r)
         break
       case 'windowRight':
-        setTimeRange(r => r ? { ...r, end: Math.min(timelineBounds.max, Math.max(t, r.start + threshold)) } : r)
+        setTimeRange(r => r ? { ...r, end: Math.min(bounds.max, Math.max(t, r.start + threshold)) } : r)
         break
       case 'windowBody': {
         const dur = ds.startWindowEnd - ds.startWindowStart
         const delta = t - ds.startTime
-        const ns = Math.max(timelineBounds.min, Math.min(timelineBounds.max - dur, ds.startWindowStart + delta))
+        const ns = Math.max(bounds.min, Math.min(bounds.max - dur, ds.startWindowStart + delta))
         setTimeRange({ start: ns, end: ns + dur })
         break
       }
       case 'drawing': {
         const s   = Math.min(ds.startWindowStart, t)
         const end = Math.max(ds.startWindowStart, t)
-        setTimeRange({ start: Math.max(timelineBounds.min, s), end: Math.min(timelineBounds.max, end) })
+        setTimeRange({ start: Math.max(bounds.min, s), end: Math.min(bounds.max, end) })
         break
       }
     }
@@ -2943,22 +2716,27 @@ export default function App() {
   function handleTimelinePointerUp(e) {
     const ds = dragStateRef.current
     if (!ds.mode) return
-    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch {}
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch {
+      // Pointer capture can already be released by the browser on cancel/lost-pointer paths.
+    }
 
     if (ds.mode === 'playheadOrDraw') {
       if (activeSource === 'replay' && replayMeta) scrubReplay(ds.startTime)
       else if (activeSource === 'live') setLiveTime(ds.startTime)
+      ds.frozenBounds = null
       ds.mode = null
       return
     }
-    if (ds.mode === 'drawing' && timelineBounds) {
-      const span = timelineBounds.max - timelineBounds.min
+    const bounds = ds.frozenBounds || timelineBounds
+    if (ds.mode === 'drawing' && bounds) {
+      const span = bounds.max - bounds.min
       if (!timeRange || (timeRange.end - timeRange.start) < span * 0.008) {
         setTimeRange(null)
         if (activeSource === 'replay' && replayMeta) scrubReplay(ds.startTime)
         else if (activeSource === 'live') setLiveTime(ds.startTime)
       }
     }
+    ds.frozenBounds = null
     ds.mode = null
     ds.movedEnough = false
   }
@@ -3007,31 +2785,6 @@ export default function App() {
 
     return () => window.clearInterval(timer)
   }, [appMode, replayMeta, replayPackets, replaySpeed, replayState])
-
-  const currentThroughput = trafficAnalysis.throughput
-  const protocolTotalBytes = Math.max(
-    trafficAnalysis.protocols.reduce((total, protocol) => total + protocol.bytes, 0),
-    1,
-  )
-
-  const packetDetails = selectedPacket
-    ? [
-      ['Frame', `${selectedPacket.id} · ${byteLabel(selectedPacket.size)}`],
-      ['Ethernet', `${selectedPacket.srcMac || 'unknown'} -> ${selectedPacket.dstMac || 'unknown'}`],
-      ['Network', `${selectedPacket.src || selectedPacket.srcIp} -> ${selectedPacket.dst || selectedPacket.dstIp}`],
-      ['Transport', packetInfo(selectedPacket)],
-    ]
-    : []
-
-  const packetBytesText = selectedPacket
-    ? [
-      `0000  ${String(selectedPacket.srcMac || 'unknown').padEnd(17)}  ${String(selectedPacket.dstMac || 'unknown').padEnd(17)}`,
-      `0010  ${String(selectedPacket.src || selectedPacket.srcIp).padEnd(20)} -> ${String(selectedPacket.dst || selectedPacket.dstIp)}`,
-      `0020  proto=${selectedPacket.proto || 'OTHER'} len=${selectedPacket.size || 0} sport=${selectedPacket.srcPort || '-'} dport=${selectedPacket.dstPort || '-'}`,
-    ].join('\n')
-    : 'Select a packet to inspect bytes.'
-
-  const reticleScale = THREE.MathUtils.clamp(1 / cameraZoom, 0.72, 1.35)
 
   // ── Checkpoint handlers ──────────────────────────────────
 
@@ -3089,12 +2842,15 @@ export default function App() {
     const result = computeCheckpointDiff(base, compare)
     setActiveDiff({ baseId, compareId, result })
     applyDiffStateRef.current?.(result)
+    setRightPanelTab('diff')
+    setRightPanelOpen(true)
   }
 
   function clearDiff() {
     setActiveDiff(null)
     setDiffMode(false)
     clearDiffStateRef.current?.()
+    setRightPanelTab(t => t === 'diff' ? 'checkpoints' : t)
   }
 
   function updateCheckpointLabel(id, label) {
@@ -3119,21 +2875,21 @@ export default function App() {
     setLabelingOpen(false)
   }
 
-  // Feature 1 — summary chip data
-  const topTalker = trafficAnalysis.endpoints[0] || null
-  const mostPeers = (() => {
-    const peerCount = new Map()
+  const mostPeersRank = useMemo(() => {
+    const peerSets = new Map()
     trafficAnalysis.conversations.forEach(c => {
-      peerCount.set(c.src, (peerCount.get(c.src) || 0) + 1)
-      peerCount.set(c.dst, (peerCount.get(c.dst) || 0) + 1)
+      if (!c.src || !c.dst) return
+      if (!peerSets.has(c.src)) peerSets.set(c.src, new Set())
+      if (!peerSets.has(c.dst)) peerSets.set(c.dst, new Set())
+      peerSets.get(c.src).add(c.dst)
+      peerSets.get(c.dst).add(c.src)
     })
-    let best = null, bestCount = 0
-    peerCount.forEach((count, ip) => {
-      if (count > bestCount) { best = ip; bestCount = count }
-    })
-    return best ? { ip: best, count: bestCount } : null
-  })()
+    return [...peerSets.entries()]
+      .map(([ip, peers]) => ({ ip, count: peers.size }))
+      .sort((a, b) => b.count - a.count || a.ip.localeCompare(b.ip))
+  }, [trafficAnalysis.conversations])
   const filteredCheckpoints = checkpoints.filter(c => !c.source || c.source === activeSource)
+  const rightPanelMenuOpen = rightPanelOpen && !selectedIp
 
   const nodeInspectionData = useMemo(() => {
     if (!selectedIp) return null
@@ -3198,13 +2954,19 @@ export default function App() {
           </button>
         ) : (
           /* ── Expanded dock ── */
-          <div className="dockInner">
-            <div className="dockHeader">
-              <span className="dockLabel">Capture</span>
-              <button type="button" className="dockCollapseBtn" onClick={() => setLiveAnalysisCollapsed(true)} aria-label="Collapse">‹</button>
-            </div>
+            <div className="dockInner">
+              <div className="dockHeader">
+                <span className="dockLabel">Capture</span>
+                <button type="button" className="dockCollapseBtn" onClick={() => setLiveAnalysisCollapsed(true)} aria-label="Collapse">‹</button>
+              </div>
+              {activeSource === 'live' && (
+                <div className={`captureStatus captureStatus--${status}`}>
+                  <span>{status === 'live' ? 'Live capture' : status.replace('_', ' ')}</span>
+                  <strong>{captureInterface}</strong>
+                </div>
+              )}
 
-            {/* Mode switcher */}
+              {/* Mode switcher */}
             <div className="dockModeSwitch">
               <button
                 type="button"
@@ -3380,233 +3142,23 @@ export default function App() {
                   }
                   <button
                     type="button"
-                    className={['cpHistoryBtn', checkpointPanelOpen ? 'active' : ''].filter(Boolean).join(' ')}
-                    onClick={() => setCheckpointPanelOpen(v => !v)}
+                    className={['cpHistoryBtn', rightPanelMenuOpen ? 'active' : ''].filter(Boolean).join(' ')}
+                    aria-pressed={rightPanelMenuOpen}
+                    onClick={() => {
+                      if (rightPanelMenuOpen) {
+                        setRightPanelOpen(false)
+                        return
+                      }
+                      setSelectedIp(null)
+                      setRightPanelTab('checkpoints')
+                      setRightPanelOpen(true)
+                    }}
                   >
-                    History{filteredCheckpoints.length > 0 ? ` (${filteredCheckpoints.length})` : ''}
+                    Menu
                   </button>
                 </div>
                 {filterError && <p className="filterError">{filterError}</p>}
               </form>
-            )}
-
-            {/* Feature 1 — Summary chips */}
-            {!screensaverActive && (
-              <div className="summaryChips">
-                {topTalker && (
-                  <button className="chip" type="button" onClick={() => setSelectedIp(topTalker.ip)}>
-                    Top Talker: <strong>{topTalker.ip}</strong>
-                  </button>
-                )}
-                {mostPeers && (
-                  <button className="chip" type="button" onClick={() => setSelectedIp(mostPeers.ip)}>
-                    Most Peers: <strong>{mostPeers.ip}</strong> ({mostPeers.count})
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Checkpoint history panel */}
-            {!screensaverActive && checkpointPanelOpen && (
-              <div className="checkpointPanel">
-                <div className="checkpointPanelHeader">
-                  <span>Checkpoints</span>
-                  <button type="button" onClick={() => setCheckpointPanelOpen(false)}>×</button>
-                </div>
-                <div className="cpModeSelector">
-                  {['off', 'smart', 'aggressive'].map(m => (
-                    <button
-                      key={m}
-                      type="button"
-                      className={autoCheckpointMode === m ? 'active' : ''}
-                      onClick={() => setAutoCheckpointMode(m)}
-                    >{m}</button>
-                  ))}
-                </div>
-                {referenceId && (() => {
-                  const refCp = checkpoints.find(c => c.id === referenceId)
-                  if (!refCp) return null
-                  return (
-                    <div className="cpReferenceBar">
-                      <span className="cpRefLabel">Reference: <strong>{refCp.label}</strong></span>
-                      <button type="button" onClick={() => computeDiff(referenceId, 'current')}>vs Current</button>
-                      <button type="button" className="cpRefClear" onClick={() => setReferenceId(null)}>Clear</button>
-                    </div>
-                  )
-                })()}
-                <div className="checkpointList">
-                  {filteredCheckpoints.length === 0 && (
-                    <p className="cpEmpty">No checkpoints yet. Click "Checkpoint" to capture current network state.</p>
-                  )}
-                  {filteredCheckpoints.slice().reverse().map(cp => (
-                    <div key={cp.id} className={['checkpointItem', cp.type === 'auto' ? 'cpAuto' : ''].filter(Boolean).join(' ')}>
-                      <div className="cpMeta">
-                        {editingCpId === cp.id
-                          ? (
-                            <input
-                              autoFocus
-                              className="cpLabelInput"
-                              value={editingCpLabel}
-                              onChange={e => setEditingCpLabel(e.target.value)}
-                              onBlur={commitRename}
-                              onKeyDown={e => {
-                                if (e.key === 'Enter') commitRename()
-                                if (e.key === 'Escape') { setEditingCpId(null); setEditingCpLabel('') }
-                              }}
-                            />
-                          )
-                          : (
-                            <span
-                              className="cpLabel cpLabelEditable"
-                              title="Double-click to rename"
-                              onDoubleClick={() => startRename(cp)}
-                            >{cp.label}</span>
-                          )
-                        }
-                        <span className="cpStats">{cp.nodeCount} hosts · {cp.edgeCount} edges</span>
-                        {cp.reason && <span className="cpReason">{cp.reason}</span>}
-                      </div>
-                      <div className="cpActions">
-                        {cp.id === referenceId
-                          ? <span className="cpRefBadge">Reference</span>
-                          : <button type="button" className="cpRefBtn" onClick={() => setReferenceId(cp.id)}>Set as Reference</button>
-                        }
-                        <button type="button" onClick={() => computeDiff(cp.id, 'current')}>vs Now</button>
-                        <button type="button" onClick={() => {
-                          if (cp.id === referenceId) setReferenceId(null)
-                          setCheckpoints(prev => prev.filter(c => c.id !== cp.id))
-                        }}>×</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <div className="focusControls">
-                  <span className="focusLabel">De-emphasize:</span>
-                  {[
-                    { key: 'BCAST', label: 'Broadcast / ARP' },
-                    { key: 'MCAST', label: 'Multicast / mDNS' },
-                  ].map(({ key, label }) => (
-                    <button
-                      key={key}
-                      type="button"
-                      className={deemphasizeGroups.has(key) ? 'active' : ''}
-                      onClick={() => setDeemphasizeGroups(prev => {
-                        const next = new Set(prev)
-                        next.has(key) ? next.delete(key) : next.add(key)
-                        return next
-                      })}
-                    >{label}</button>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Diff panel */}
-            {!screensaverActive && activeDiff && (
-              <div className="diffPanel">
-                <div className="diffHeader">
-                  <span className="diffTitle">Diff</span>
-                  <label className="diffOnlyToggle">
-                    <input type="checkbox" checked={diffMode} onChange={e => setDiffMode(e.target.checked)} />
-                    Diff only
-                  </label>
-                  <button type="button" className="diffClearBtn" onClick={clearDiff}>Clear</button>
-                </div>
-                <div className="diffCards">
-                  {activeDiff.result.summary.addedNodeCount > 0 &&
-                    <div className="diffCard added">+{activeDiff.result.summary.addedNodeCount} hosts</div>}
-                  {activeDiff.result.summary.removedNodeCount > 0 &&
-                    <div className="diffCard removed">−{activeDiff.result.summary.removedNodeCount} hosts</div>}
-                  {activeDiff.result.summary.addedEdgeCount > 0 &&
-                    <div className="diffCard added">+{activeDiff.result.summary.addedEdgeCount} convs</div>}
-                  {activeDiff.result.summary.removedEdgeCount > 0 &&
-                    <div className="diffCard removed">−{activeDiff.result.summary.removedEdgeCount} convs</div>}
-                  {activeDiff.result.summary.changedNodeCount > 0 &&
-                    <div className="diffCard changed">{activeDiff.result.summary.changedNodeCount} changed</div>}
-                </div>
-                <div className="diffLegend">
-                  <span className="diffLegendItem added">added</span>
-                  <span className="diffLegendItem changed">changed</span>
-                  <span className="diffLegendItem removed">removed</span>
-                </div>
-                <div className="diffDetails">
-                  {activeDiff.result.addedNodes.length > 0 && (
-                    <section className="diffSection">
-                      <h4>+ Added Hosts</h4>
-                      {activeDiff.result.addedNodes.map(n => (
-                        <button key={n.ip} type="button" className="diffNodeRow added" onClick={() => setSelectedIp(n.ip)}>
-                          <span className="diffIp">{n.ip}</span>
-                          <span className="diffKind">{n.kind}</span>
-                        </button>
-                      ))}
-                    </section>
-                  )}
-                  {activeDiff.result.removedNodes.length > 0 && (
-                    <section className="diffSection">
-                      <h4>− Removed Hosts</h4>
-                      {activeDiff.result.removedNodes.map(n => (
-                        <div key={n.ip} className="diffNodeRow removed">
-                          <span className="diffIp">{n.ip}</span>
-                          <span className="diffKind">{n.kind}</span>
-                        </div>
-                      ))}
-                    </section>
-                  )}
-                  {activeDiff.result.changedNodes.length > 0 && (
-                    <section className="diffSection">
-                      <h4>Changed Hosts</h4>
-                      {activeDiff.result.changedNodes.slice(0, 10).map(n => (
-                        <button key={n.ip} type="button" className="diffNodeRow changed" onClick={() => setSelectedIp(n.ip)}>
-                          <span className="diffIp">{n.ip}</span>
-                          <span className="diffDelta">{fmtBytes(n.bytesDelta)}</span>
-                          <span className="diffReasonChip">{n.reason}</span>
-                        </button>
-                      ))}
-                    </section>
-                  )}
-                  {activeDiff.result.addedEdges.length > 0 && (
-                    <section className="diffSection">
-                      <h4>+ Added Conversations</h4>
-                      {activeDiff.result.addedEdges.slice(0, 10).map((e, i) => (
-                        <div key={i} className="diffEdgeRow added">
-                          <span>{e.src}</span>
-                          <span className="diffArrow">→</span>
-                          <span>{e.dst}</span>
-                          {e.isExternal && <span className="diffExtBadge">ext</span>}
-                        </div>
-                      ))}
-                    </section>
-                  )}
-                  {activeDiff.result.removedEdges.length > 0 && (
-                    <section className="diffSection">
-                      <h4>− Removed Conversations</h4>
-                      {activeDiff.result.removedEdges.slice(0, 10).map((e, i) => (
-                        <div key={i} className="diffEdgeRow removed">
-                          <span>{e.src}</span>
-                          <span className="diffArrow">→</span>
-                          <span>{e.dst}</span>
-                        </div>
-                      ))}
-                    </section>
-                  )}
-                  {activeDiff.result.protocolDeltas.length > 0 && (
-                    <section className="diffSection">
-                      <h4>Protocol Shifts</h4>
-                      {activeDiff.result.protocolDeltas.slice(0, 8).map(d => (
-                        <div key={d.proto} className="diffProtoRow">
-                          <span className="diffProto">{d.proto}</span>
-                          <span className={d.pktsDelta > 0 ? 'diffPos' : 'diffNeg'}>
-                            {d.pktsDelta > 0 ? '+' : ''}{d.pktsDelta} pkts
-                          </span>
-                          <span className={d.pctChange > 0 ? 'diffPos' : 'diffNeg'}>
-                            {d.pctChange > 0 ? '+' : ''}{d.pctChange}%
-                          </span>
-                        </div>
-                      ))}
-                    </section>
-                  )}
-                </div>
-              </div>
             )}
 
             <div ref={mountRef} className="canvasMount" />
@@ -3658,28 +3210,11 @@ export default function App() {
                 }}
               />
             )}
-            {pointReticle.active && (
-              <div
-                className={[
-                  'pointReticle',
-                  pointReticle.locked ? 'locked' : '',
-                  pointReticle.lockProgress > 0 ? 'locking' : '',
-                ].filter(Boolean).join(' ')}
-                aria-hidden="true"
-                style={{
-                  left: `${pointReticle.x}px`,
-                  top: `${pointReticle.y}px`,
-                  '--lock-progress': `${Math.round(pointReticle.lockProgress * 100)}%`,
-                  '--reticle-scale': reticleScale,
-                }}
-              />
-            )}
-
             {!screensaverActive && analysisContent[activeTab]?.()}
 
             {/* Right panel — inspection drawer (node detail) or top talkers */}
             {!screensaverActive && (
-              <aside className={['inspectionDrawer', (selectedIp || rightPanelOpen) ? 'open' : ''].filter(Boolean).join(' ')}>
+              <aside className={['inspectionDrawer', rightPanelMenuOpen ? 'menuDrawer' : '', (selectedIp || rightPanelOpen) ? 'open' : ''].filter(Boolean).join(' ')}>
                 {selectedIp ? (
                   <>
                     <div className="inspectionHeader">
@@ -3749,110 +3284,310 @@ export default function App() {
                       )}
                     </div>
                   </>
-                ) : rightPanelOpen && timeRange && windowAnalysis ? (
-                  /* Window Summary — shown when a time range is selected */
-                  <div className="windowSummary">
-                    <div className="windowSummaryHeader">
-                      <span className="windowSummaryTitle">
-                        {windowCompareActive ? 'Top Changes' : 'Window Summary'}
-                        <span className="windowDuration"> ({formatWindowDuration(timeRange)})</span>
-                      </span>
-                      <button type="button" className="inspectionClose" onClick={() => { setTimeRange(null); setWindowCompareActive(false) }}>×</button>
-                    </div>
-                    <div className="windowStatRow">
-                      <span>{windowAnalysis.endpoints.length} hosts</span>
-                      <span>{fmtBytes(windowAnalysis.totalBytes)}</span>
-                      {windowDiffResult && <span className="windowNewCount">+{windowDiffResult.summary.addedNodeCount} new</span>}
-                    </div>
-                    <div className="windowSection">
-                      <div className="windowSectionTitle">{windowCompareActive && windowDiffResult ? 'Top Changes' : 'Top Talkers'}</div>
-                      {(windowCompareActive && windowDiffResult?.changedNodes.length > 0
-                        ? windowDiffResult.changedNodes.slice(0, 6)
-                        : windowAnalysis.endpoints.slice(0, 6)
-                      ).map(item => {
-                        const ip = item.ip
-                        const isNew = windowDiffResult?.addedNodes.some(n => n.ip === ip)
-                        const isChanged = !isNew && windowDiffResult?.changedNodes.some(n => n.ip === ip)
-                        return (
-                          <button key={ip} type="button" className="windowNodeRow" onClick={() => setSelectedIp(ip)}>
-                            <span className="windowNodeIp">{ip}</span>
-                            <span className="windowNodeBytes">{fmtBytes(item.bytes ?? item.bytesDelta ?? 0)}</span>
-                            {isNew && <span className="windowBadge new">new</span>}
-                            {isChanged && <span className="windowBadge chg">↑</span>}
-                          </button>
-                        )
-                      })}
-                    </div>
-                    {windowDiffResult?.addedNodes.filter(n => n.kind === 'external').length > 0 && (
-                      <div className="windowSection">
-                        <div className="windowSectionTitle">New External</div>
-                        {windowDiffResult.addedNodes.filter(n => n.kind === 'external').slice(0, 4).map(n => (
-                          <button key={n.ip} type="button" className="windowNodeRow" onClick={() => setSelectedIp(n.ip)}>
-                            <span className="windowNodeIp">{n.ip}</span>
-                            <span className="windowBadge ext">ext</span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                    <div className="windowSection">
-                      <div className="windowSectionTitle">Protocols</div>
-                      {windowAnalysis.protocols.slice(0, 5).map(p => {
-                        const delta = windowDiffResult?.protocolDeltas.find(d => d.proto === p.proto)
-                        return (
-                          <div key={p.proto} className="windowProtoRow">
-                            <span>{p.proto}</span>
-                            <span>{p.packets} pkts</span>
-                            {delta && Math.abs(delta.pctChange) > 10 && (
-                              <span className="windowBadge chg">{delta.pctChange > 0 ? '+' : ''}{delta.pctChange}%</span>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
                 ) : rightPanelOpen ? (
-                  /* Top Talkers view (default when no node selected) */
+                  /* Tabbed secondary panel: History | Most Peers | Top Talkers | Diff */
                   <>
-                    <div className="inspectionHeader">
-                      <span className="inspectionIp" style={{ color: 'var(--text-dim)' }}>Top Talkers</span>
-                      <button type="button" className="inspectionClose" onClick={() => setRightPanelOpen(false)}>×</button>
-                    </div>
-                    <div className="inspectionBody">
-                      {trafficAnalysis.endpoints.length === 0 ? (
-                        <p className="inspectionEmpty">No traffic yet.</p>
-                      ) : (
-                        <ul className="inspectionList">
-                          {trafficAnalysis.endpoints.slice(0, 20).map((ep, i) => (
-                            <li key={ep.ip}>
-                              <span style={{ color: 'var(--text-dimmer)', minWidth: 20, flexShrink: 0 }}>#{i + 1}</span>
-                              <button type="button" onClick={() => setSelectedIp(ep.ip)}>{ep.ip}</button>
-                              <span>{fmtBytes(ep.bytes)}</span>
-                            </li>
-                          ))}
-                        </ul>
+                    <div className="inspectorTabs">
+                      <button type="button" className={rightPanelTab === 'checkpoints' ? 'active' : ''} onClick={() => setRightPanelTab('checkpoints')}>
+                        History{filteredCheckpoints.length > 0 ? ` (${filteredCheckpoints.length})` : ''}
+                      </button>
+                      <button type="button" className={rightPanelTab === 'mostpeers' ? 'active' : ''} onClick={() => setRightPanelTab('mostpeers')}>Most Peers</button>
+                      <button type="button" className={rightPanelTab === 'toptalkers' ? 'active' : ''} onClick={() => setRightPanelTab('toptalkers')}>Top Talkers</button>
+                      {activeDiff && (
+                        <button type="button" className={rightPanelTab === 'diff' ? 'active' : ''} onClick={() => setRightPanelTab('diff')}>Diff</button>
                       )}
                     </div>
+
+                    {/* Most Peers tab */}
+                    {rightPanelTab === 'mostpeers' && (
+                      <div className="inspectionBody">
+                        {mostPeersRank.length === 0 ? (
+                          <p className="inspectionEmpty">No traffic yet.</p>
+                        ) : (
+                          <ul className="inspectionList">
+                            {mostPeersRank.slice(0, 20).map((ep, i) => (
+                              <li key={ep.ip}>
+                                <span style={{ color: 'var(--text-dimmer)', minWidth: 20, flexShrink: 0 }}>#{i + 1}</span>
+                                <button type="button" onClick={() => setSelectedIp(ep.ip)}>{ep.ip}</button>
+                                <span>{ep.count} peer{ep.count === 1 ? '' : 's'}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Top Talkers tab — includes window summary when a time range is active */}
+                    {rightPanelTab === 'toptalkers' && (
+                      timeRange && windowAnalysis ? (
+                        <div className="windowSummary">
+                          <div className="windowSummaryHeader">
+                            <span className="windowSummaryTitle">
+                              {windowCompareActive ? 'Top Changes' : 'Window Summary'}
+                              <span className="windowDuration"> ({formatWindowDuration(timeRange)})</span>
+                            </span>
+                            <button type="button" className="inspectionClose" onClick={() => { setTimeRange(null); setWindowCompareActive(false) }}>×</button>
+                          </div>
+                          <div className="windowStatRow">
+                            <span>{windowAnalysis.endpoints.length} hosts</span>
+                            <span>{fmtBytes(windowAnalysis.totalBytes)}</span>
+                            {windowDiffResult && <span className="windowNewCount">+{windowDiffResult.summary.addedNodeCount} new</span>}
+                          </div>
+                          <div className="windowSection">
+                            <div className="windowSectionTitle">{windowCompareActive && windowDiffResult ? 'Top Changes' : 'Top Talkers'}</div>
+                            {(windowCompareActive && windowDiffResult?.changedNodes.length > 0
+                              ? windowDiffResult.changedNodes.slice(0, 6)
+                              : windowAnalysis.endpoints.slice(0, 6)
+                            ).map(item => {
+                              const ip = item.ip
+                              const isNew = windowDiffResult?.addedNodes.some(n => n.ip === ip)
+                              const isChanged = !isNew && windowDiffResult?.changedNodes.some(n => n.ip === ip)
+                              return (
+                                <button key={ip} type="button" className="windowNodeRow" onClick={() => setSelectedIp(ip)}>
+                                  <span className="windowNodeIp">{ip}</span>
+                                  <span className="windowNodeBytes">{fmtBytes(item.bytes ?? item.bytesDelta ?? 0)}</span>
+                                  {isNew && <span className="windowBadge new">new</span>}
+                                  {isChanged && <span className="windowBadge chg">↑</span>}
+                                </button>
+                              )
+                            })}
+                          </div>
+                          {windowDiffResult?.addedNodes.filter(n => n.kind === 'external').length > 0 && (
+                            <div className="windowSection">
+                              <div className="windowSectionTitle">New External</div>
+                              {windowDiffResult.addedNodes.filter(n => n.kind === 'external').slice(0, 4).map(n => (
+                                <button key={n.ip} type="button" className="windowNodeRow" onClick={() => setSelectedIp(n.ip)}>
+                                  <span className="windowNodeIp">{n.ip}</span>
+                                  <span className="windowBadge ext">ext</span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          <div className="windowSection">
+                            <div className="windowSectionTitle">Protocols</div>
+                            {windowAnalysis.protocols.slice(0, 5).map(p => {
+                              const delta = windowDiffResult?.protocolDeltas.find(d => d.proto === p.proto)
+                              return (
+                                <div key={p.proto} className="windowProtoRow">
+                                  <span>{p.proto}</span>
+                                  <span>{p.packets} pkts</span>
+                                  {delta && Math.abs(delta.pctChange) > 10 && (
+                                    <span className="windowBadge chg">{delta.pctChange > 0 ? '+' : ''}{delta.pctChange}%</span>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="inspectionBody">
+                          {trafficAnalysis.endpoints.length === 0 ? (
+                            <p className="inspectionEmpty">No traffic yet.</p>
+                          ) : (
+                            <ul className="inspectionList">
+                              {trafficAnalysis.endpoints.slice(0, 20).map((ep, i) => (
+                                <li key={ep.ip}>
+                                  <span style={{ color: 'var(--text-dimmer)', minWidth: 20, flexShrink: 0 }}>#{i + 1}</span>
+                                  <button type="button" onClick={() => setSelectedIp(ep.ip)}>{ep.ip}</button>
+                                  <span>{fmtBytes(ep.bytes)}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      )
+                    )}
+
+                    {/* Checkpoints (History) tab */}
+                    {rightPanelTab === 'checkpoints' && (
+                      <>
+                        <div className="cpModeSelector">
+                          {['off', 'smart', 'aggressive'].map(m => (
+                            <button
+                              key={m}
+                              type="button"
+                              className={autoCheckpointMode === m ? 'active' : ''}
+                              onClick={() => setAutoCheckpointMode(m)}
+                            >{m}</button>
+                          ))}
+                        </div>
+                        <div className="checkpointList">
+                          {filteredCheckpoints.length === 0 && (
+                            <p className="cpEmpty">No checkpoints yet. Click "Checkpoint" to capture current network state.</p>
+                          )}
+                          {filteredCheckpoints.slice().reverse().map(cp => (
+                            <div key={cp.id} className={['checkpointItem', cp.type === 'auto' ? 'cpAuto' : ''].filter(Boolean).join(' ')}>
+                              <div className="cpMeta">
+                                {editingCpId === cp.id
+                                  ? (
+                                    <input
+                                      autoFocus
+                                      className="cpLabelInput"
+                                      value={editingCpLabel}
+                                      onChange={e => setEditingCpLabel(e.target.value)}
+                                      onBlur={commitRename}
+                                      onKeyDown={e => {
+                                        if (e.key === 'Enter') commitRename()
+                                        if (e.key === 'Escape') { setEditingCpId(null); setEditingCpLabel('') }
+                                      }}
+                                    />
+                                  )
+                                  : (
+                                    <span
+                                      className="cpLabel cpLabelEditable"
+                                      title="Double-click to rename"
+                                      onDoubleClick={() => startRename(cp)}
+                                    >{cp.label}</span>
+                                  )
+                                }
+                                <span className="cpStats">{cp.nodeCount} hosts · {cp.edgeCount} edges</span>
+                                {cp.reason && <span className="cpReason">{cp.reason}</span>}
+                              </div>
+                              <div className="cpActions">
+                                <button type="button" onClick={() => computeDiff(cp.id, 'current')}>vs Now</button>
+                                <button type="button" onClick={() => {
+                                  if (activeDiff?.baseId === cp.id || activeDiff?.compareId === cp.id) {
+                                    setActiveDiff(null)
+                                    clearDiffStateRef.current?.()
+                                  }
+                                  setCheckpoints(prev => prev.filter(c => c.id !== cp.id))
+                                }}>×</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="focusControls">
+                          <span className="focusLabel">De-emphasize:</span>
+                          {[
+                            { key: 'BCAST', label: 'Broadcast / ARP' },
+                            { key: 'MCAST', label: 'Multicast / mDNS' },
+                          ].map(({ key, label }) => (
+                            <button
+                              key={key}
+                              type="button"
+                              className={deemphasizeGroups.has(key) ? 'active' : ''}
+                              onClick={() => setDeemphasizeGroups(prev => {
+                                const next = new Set(prev)
+                                next.has(key) ? next.delete(key) : next.add(key)
+                                return next
+                              })}
+                            >{label}</button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    {/* Diff tab */}
+                    {rightPanelTab === 'diff' && activeDiff && (
+                      <>
+                        <div className="diffHeader">
+                          <span className="diffTitle">Diff</span>
+                          <label className="diffOnlyToggle">
+                            <input type="checkbox" checked={diffMode} onChange={e => setDiffMode(e.target.checked)} />
+                            Diff only
+                          </label>
+                          <button type="button" className="diffClearBtn" onClick={clearDiff}>Clear</button>
+                        </div>
+                        <div className="diffCards">
+                          {activeDiff.result.summary.addedNodeCount > 0 &&
+                            <div className="diffCard added">+{activeDiff.result.summary.addedNodeCount} hosts</div>}
+                          {activeDiff.result.summary.removedNodeCount > 0 &&
+                            <div className="diffCard removed">−{activeDiff.result.summary.removedNodeCount} hosts</div>}
+                          {activeDiff.result.summary.addedEdgeCount > 0 &&
+                            <div className="diffCard added">+{activeDiff.result.summary.addedEdgeCount} convs</div>}
+                          {activeDiff.result.summary.removedEdgeCount > 0 &&
+                            <div className="diffCard removed">−{activeDiff.result.summary.removedEdgeCount} convs</div>}
+                          {activeDiff.result.summary.changedNodeCount > 0 &&
+                            <div className="diffCard changed">{activeDiff.result.summary.changedNodeCount} changed</div>}
+                        </div>
+                        <div className="diffLegend">
+                          <span className="diffLegendItem added">added</span>
+                          <span className="diffLegendItem changed">changed</span>
+                          <span className="diffLegendItem removed">removed</span>
+                        </div>
+                        <div className="diffDetails">
+                          {activeDiff.result.addedNodes.length > 0 && (
+                            <section className="diffSection">
+                              <h4>+ Added Hosts</h4>
+                              {activeDiff.result.addedNodes.map(n => (
+                                <button key={n.ip} type="button" className="diffNodeRow added" onClick={() => setSelectedIp(n.ip)}>
+                                  <span className="diffIp">{n.ip}</span>
+                                  <span className="diffKind">{n.kind}</span>
+                                </button>
+                              ))}
+                            </section>
+                          )}
+                          {activeDiff.result.removedNodes.length > 0 && (
+                            <section className="diffSection">
+                              <h4>− Removed Hosts</h4>
+                              {activeDiff.result.removedNodes.map(n => (
+                                <div key={n.ip} className="diffNodeRow removed">
+                                  <span className="diffIp">{n.ip}</span>
+                                  <span className="diffKind">{n.kind}</span>
+                                </div>
+                              ))}
+                            </section>
+                          )}
+                          {activeDiff.result.changedNodes.length > 0 && (
+                            <section className="diffSection">
+                              <h4>Changed Hosts</h4>
+                              {activeDiff.result.changedNodes.slice(0, 10).map(n => (
+                                <button key={n.ip} type="button" className="diffNodeRow changed" onClick={() => setSelectedIp(n.ip)}>
+                                  <span className="diffIp">{n.ip}</span>
+                                  <span className="diffDelta">{fmtBytes(n.bytesDelta)}</span>
+                                  <span className="diffReasonChip">{n.reason}</span>
+                                </button>
+                              ))}
+                            </section>
+                          )}
+                          {activeDiff.result.addedEdges.length > 0 && (
+                            <section className="diffSection">
+                              <h4>+ Added Conversations</h4>
+                              {activeDiff.result.addedEdges.slice(0, 10).map((e, i) => (
+                                <div key={i} className="diffEdgeRow added">
+                                  <span>{e.src}</span>
+                                  <span className="diffArrow">→</span>
+                                  <span>{e.dst}</span>
+                                  {e.isExternal && <span className="diffExtBadge">ext</span>}
+                                </div>
+                              ))}
+                            </section>
+                          )}
+                          {activeDiff.result.removedEdges.length > 0 && (
+                            <section className="diffSection">
+                              <h4>− Removed Conversations</h4>
+                              {activeDiff.result.removedEdges.slice(0, 10).map((e, i) => (
+                                <div key={i} className="diffEdgeRow removed">
+                                  <span>{e.src}</span>
+                                  <span className="diffArrow">→</span>
+                                  <span>{e.dst}</span>
+                                </div>
+                              ))}
+                            </section>
+                          )}
+                          {activeDiff.result.protocolDeltas.length > 0 && (
+                            <section className="diffSection">
+                              <h4>Protocol Shifts</h4>
+                              {activeDiff.result.protocolDeltas.slice(0, 8).map(d => (
+                                <div key={d.proto} className="diffProtoRow">
+                                  <span className="diffProto">{d.proto}</span>
+                                  <span className={d.pktsDelta > 0 ? 'diffPos' : 'diffNeg'}>
+                                    {d.pktsDelta > 0 ? '+' : ''}{d.pktsDelta} pkts
+                                  </span>
+                                  <span className={d.pctChange > 0 ? 'diffPos' : 'diffNeg'}>
+                                    {d.pctChange > 0 ? '+' : ''}{d.pctChange}%
+                                  </span>
+                                </div>
+                              ))}
+                            </section>
+                          )}
+                        </div>
+                      </>
+                    )}
                   </>
                 ) : null}
               </aside>
             )}
-
-            <section className="graphToolbar liveGraphToolbar" aria-label="Graph controls" style={{ display: screensaverActive ? 'none' : undefined }}>
-              <button
-                type="button"
-                style={{ color: gesturesEnabled ? '#4af0b4' : undefined }}
-                onClick={() => setGesturesEnabled(e => !e)}
-              >
-                {gesturesEnabled ? '✋ ON' : '✋ Gestures'}
-              </button>
-              <button
-                type="button"
-                style={{ color: rightPanelOpen && !selectedIp ? 'var(--accent)' : undefined }}
-                onClick={() => { setRightPanelOpen(v => !v); setSelectedIp(null) }}
-              >
-                {rightPanelOpen && !selectedIp ? 'Hide Panel' : 'Top Talkers'}
-              </button>
-            </section>
 
             {selectedIp && (
               <button className="wholeNetworkButton" type="button" onClick={() => setSelectedIp(null)}>
@@ -3864,7 +3599,9 @@ export default function App() {
             {!screensaverActive && (
               <div className="timelineStrip">
                 {(() => {
-                  const bounds = timelineBounds ?? (activeSource === 'replay' && replayMeta ? { min: 0, max: replayMeta.duration } : null)
+                  const bounds = (dragStateRef.current.mode != null && dragStateRef.current.frozenBounds)
+                    ? dragStateRef.current.frozenBounds
+                    : (timelineBounds ?? (activeSource === 'replay' && replayMeta ? { min: 0, max: replayMeta.duration } : null))
                   if (!bounds) return null
                   const span     = bounds.max - bounds.min
                   const leftPct  = timeRange ? ((timeRange.start - bounds.min) / span) * 100 : null

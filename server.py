@@ -6,11 +6,17 @@ import threading
 import time
 import webbrowser
 from collections import defaultdict
+from urllib.parse import urlparse
 
 import websockets
 from scapy.all import DNS, Ether, IP, TCP, UDP, sniff
 
 clients = set()
+ALLOWED_ORIGINS = {
+    "http://127.0.0.1:5176",
+    "http://localhost:5176",
+    "http://[::1]:5176",
+}
 node_data = defaultdict(lambda: {"bytes": 0, "packets": 0, "ip": ""})
 lock = threading.Lock()
 loop = None
@@ -22,6 +28,33 @@ iface = os.environ.get("PACMAP_IFACE") or None
 
 def iface_label():
     return iface or "default interface"
+
+
+def request_origin(websocket):
+    request = getattr(websocket, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        return headers.get("Origin")
+
+    headers = getattr(websocket, "request_headers", None)
+    if headers is not None:
+        return headers.get("Origin")
+
+    return None
+
+
+async def reject_untrusted_origin(websocket):
+    origin = request_origin(websocket)
+    if origin is None or origin in ALLOWED_ORIGINS:
+        return False
+
+    parsed = urlparse(origin)
+    if parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"} and parsed.port == 5176:
+        return False
+
+    await websocket.close(code=1008, reason="Origin not allowed")
+    print(f"Rejected websocket origin: {origin}")
+    return True
 
 
 def get_protocol(packet):
@@ -162,6 +195,9 @@ async def send_nodes():
 
 
 async def handler(websocket):
+    if await reject_untrusted_origin(websocket):
+        return
+
     clients.add(websocket)
     print(f"[+] Client connected. Total: {len(clients)}")
 

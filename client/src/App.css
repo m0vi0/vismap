@@ -1,5 +1,4 @@
 @import "tailwindcss";
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
 
 @theme inline {
   --color-background: hsl(var(--background));
@@ -358,59 +357,6 @@ button { font: inherit; }
 .filterSuggestions li.active {
   background: rgba(255,255,255,0.07);
   color: #fff;
-}
-
-/* ── Graph toolbar ─────────────────────────────────────── */
-
-.graphToolbar {
-  position: absolute;
-  top: 12px;
-  right: 14px;
-  z-index: 4;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.liveGraphToolbar {
-  top: 56px;
-  right: 14px;
-  left: auto;
-  max-width: none;
-}
-
-.graphToolbar button,
-.graphToolbar select,
-.graphToolbar span {
-  height: 30px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--panel-bg-dim);
-  color: var(--text-dim);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.65rem;
-  font-weight: 400;
-  letter-spacing: 0.06em;
-  padding: 0 10px;
-  text-transform: uppercase;
-  backdrop-filter: blur(16px);
-  transition: border-color 0.15s, color 0.15s;
-}
-
-.graphToolbar button, .graphToolbar select { cursor: pointer; }
-
-.graphToolbar button:hover,
-.graphToolbar select:focus-visible,
-.graphToolbar button:focus-visible {
-  border-color: var(--border-bright);
-  color: var(--text);
-  outline: none;
-}
-
-.graphToolbar span {
-  display: inline-flex;
-  align-items: center;
-  color: var(--text-dimmer);
 }
 
 /* ── Analysis panel ────────────────────────────────────── */
@@ -796,6 +742,43 @@ button { font: inherit; }
 }
 
 .sourcePanel { display: grid; gap: 10px; width: 100%; min-width: 0; box-sizing: border-box; }
+
+.captureStatus {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text-dim);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.58rem;
+  padding: 5px 7px;
+  text-transform: uppercase;
+}
+
+.captureStatus strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-dimmer);
+  font-weight: 500;
+  text-transform: none;
+}
+
+.captureStatus--live {
+  border-color: rgba(52, 211, 153, 0.35);
+  color: #34d399;
+}
+
+.captureStatus--offline,
+.captureStatus--capture_error {
+  border-color: rgba(248, 113, 113, 0.35);
+  color: #f87171;
+}
 
 .sourcePanel input:not([type="file"]) {
   width: 100%;
@@ -1771,51 +1754,6 @@ h1, h2, p { overflow-wrap: anywhere; }
   color: var(--accent);
 }
 
-/* ── Feature 1 — Summary chips ─────────────────────────── */
-
-.summaryChips {
-  position: absolute;
-  top: 48px;
-  left: 208px;
-  right: 0;
-  z-index: 3;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 16px;
-  pointer-events: none;
-  flex-wrap: nowrap;
-  overflow: visible;
-  z-index: 7;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 26px;
-  padding: 0 10px;
-  border: 1px solid var(--border-bright);
-  border-radius: 999px;
-  background: rgba(4, 4, 10, 0.82);
-  color: var(--text-dim);
-  font: inherit;
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.62rem;
-  font-weight: 400;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-  backdrop-filter: blur(12px);
-  cursor: pointer;
-  pointer-events: auto;
-  transition: border-color 0.12s, color 0.12s;
-}
-
-.chip:hover { border-color: var(--accent); color: var(--text); }
-
-.chip strong { font-weight: 600; color: var(--text); }
-
-
 /* ── Feature 3 — Bottom timeline strip ─────────────────── */
 
 .timelineStrip {
@@ -2027,7 +1965,7 @@ h1, h2, p { overflow-wrap: anywhere; }
   right: 0;
   bottom: 48px;
   z-index: 5;
-  width: 280px;
+  width: 300px;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--border);
@@ -2039,9 +1977,45 @@ h1, h2, p { overflow-wrap: anywhere; }
   pointer-events: none;
 }
 
+.inspectionDrawer.menuDrawer {
+  width: min(360px, calc(100vw - 16px));
+}
+
 .inspectionDrawer.open {
   transform: translateX(0);
   pointer-events: auto;
+}
+
+.inspectorTabs {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  padding: 0 4px;
+  background: rgba(255,255,255,0.02);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.inspectorTabs button {
+  flex-shrink: 0;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.6rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  padding: 7px 10px;
+  color: var(--text-dimmer);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s, border-color 0.12s;
+}
+.inspectorTabs button:hover { color: var(--text-dim); }
+.inspectorTabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
 .inspectionHeader {
@@ -2198,7 +2172,6 @@ h1, h2, p { overflow-wrap: anywhere; }
   .analysisViewport .canvasMount { left: 416px; }
   .liveViewport .controlDock { width: 176px; }
   .liveViewport .canvasMount { left: 0; }
-  .liveGraphToolbar { right: 14px; left: auto; }
 }
 
 @media (max-width: 900px) {
@@ -2219,7 +2192,6 @@ h1, h2, p { overflow-wrap: anywhere; }
   .viewport { min-height: 600px; }
   .analysisTab { top: 48px; right: 0; bottom: auto; left: 0; width: auto; max-height: 280px; }
   .canvasMount { top: 348px; right: 0; bottom: 260px; left: 0; border: none; border-radius: 0; }
-  .graphToolbar { top: 10px; right: 10px; left: 10px; max-width: none; }
   .trafficFilterBar { grid-template-columns: minmax(0, 1fr) auto; right: 0; left: 0; }
   .trafficFilterBar span, .trafficFilterBar .filterError { grid-column: 1 / -1; }
 }
@@ -2269,21 +2241,10 @@ h1, h2, p { overflow-wrap: anywhere; }
 /* ── Checkpoint history panel ───────────────────────────── */
 
 .checkpointPanel {
-  position: absolute;
-  top: 48px;
-  left: 0;
-  z-index: 8;
-  width: 260px;
-  max-height: 360px;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-bright);
-  border-top: none;
-  border-radius: 0 0 8px 0;
-  background: var(--panel-bg-deep);
-  backdrop-filter: blur(24px);
   overflow: hidden;
-  box-shadow: 4px 8px 32px rgba(0,0,0,0.5);
+  flex: 1;
 }
 
 .checkpointPanelHeader {
@@ -2406,20 +2367,10 @@ h1, h2, p { overflow-wrap: anywhere; }
 /* ── Diff panel ─────────────────────────────────────────── */
 
 .diffPanel {
-  position: absolute;
-  top: 84px;
-  right: 16px;
-  z-index: 6;
-  width: 300px;
-  max-height: calc(100% - 148px);
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-bright);
-  border-radius: 8px;
-  background: rgba(4, 4, 10, 0.96);
-  backdrop-filter: blur(24px);
   overflow: hidden;
-  box-shadow: 4px 8px 32px rgba(0,0,0,0.6);
+  flex: 1;
 }
 
 .diffHeader {
@@ -2698,26 +2649,6 @@ button.diffNodeRow:hover { background: var(--surface2); }
 }
 .cpModeSelector button:hover:not(.active) { background: var(--surface2); }
 
-/* ── Reference Snapshot ─────────────────────────────────── */
-
-.cpReferenceBar {
-  display: flex; align-items: center; gap: 6px;
-  padding: 6px 10px; border-bottom: 1px solid var(--border);
-  background: rgba(99, 102, 241, 0.06); font-size: 0.68rem;
-}
-.cpRefLabel { flex: 1; color: var(--text-dim); }
-.cpRefBadge {
-  font-size: 0.58rem; padding: 1px 6px; border-radius: 4px;
-  background: rgba(99, 102, 241, 0.15); color: var(--accent);
-  border: 1px solid rgba(99, 102, 241, 0.3); flex-shrink: 0;
-}
-.cpRefBtn {
-  font-size: 0.6rem; padding: 2px 6px; border-radius: 4px;
-  border: 1px solid var(--border); background: transparent;
-  color: var(--text-dim); cursor: pointer;
-}
-.cpRefBtn:hover { border-color: var(--accent); color: var(--accent); }
-.cpRefClear { font-size: 0.6rem; color: var(--text-dimmer); background: none; border: none; cursor: pointer; }
 
 /* ── Traffic De-emphasis controls ───────────────────────── */
 
